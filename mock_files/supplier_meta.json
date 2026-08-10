@@ -1,0 +1,12 @@
+[
+  {
+    "supplier": "Mueller GmbH",
+    "country": "DE",
+    "rating": "A"
+  },
+  {
+    "supplier": "Schmidt AG",
+    "country": "DE",
+    "rating": "B"
+  }
+]
