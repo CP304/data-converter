@@ -1,0 +1,22 @@
+From: vertrieb@mueller-gmbh.example
+To: einkauf@firma.example
+Subject: Angebot A-2026-0815
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=GRENZE
+
+--GRENZE
+Content-Type: text/plain; charset=utf-8
+
+Sehr geehrte Damen und Herren,
+
+anbei unsere aktuelle Preisliste.
+
+Mit freundlichen Gruessen
+Mueller GmbH
+--GRENZE
+Content-Type: text/csv; name=preisliste_mueller.csv
+Content-Disposition: attachment; filename=preisliste_mueller.csv
+Content-Transfer-Encoding: base64
+
+c2t1O3ByZWlzO3dhZWhydW5nCkEtMTAwOzEyLDQwO0VVUgpCLTIwMDs4LDEwO0VVUgo=
+--GRENZE--

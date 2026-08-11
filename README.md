@@ -1,6 +1,9 @@
 # Einkauf Data Converter
 
-Kleines Python-GUI-Tool fuer Einkaeufer, um Dateien aus Ordnern oder Einzeldateien gesammelt zu konvertieren.
+Werkzeugkasten für die tägliche Einkaufsarbeit: Lieferantendaten konvertieren,
+aufbereiten, umbenennen, packen und dokumentieren — **komplett mit
+Python-Bordmitteln**. Keine Installationen, keine APIs, keine Abhängigkeiten
+(auch kein Pillow/LibreOffice/FreeCAD).
 
 ## Start
 
@@ -8,103 +11,120 @@ Kleines Python-GUI-Tool fuer Einkaeufer, um Dateien aus Ordnern oder Einzeldatei
 python data_converter_gui.py
 ```
 
-Oder unter Windows:
-
-```powershell
-.\start_data_converter.bat
-```
-
-Falls Windows `python` nicht kennt, Python installieren oder im Projekt eine `.venv` anlegen. Der Starter prueft `.venv`, `python` und `py`.
+Oder unter Windows per Doppelklick: `start_data_converter.bat`
+(prüft `.venv`, `python` und `py`).
 
 ## Bedienlogik
 
-- Jede Konvertierungsregel ist eine kompakte Tabellenzeile.
-- Pfad als Ordner oder Einzeldatei waehlen.
-- Inputformate ueber `Input` gruppiert nach CAD, Tabellen, Office, Dokumenten, Bildern, Print, PDF, Archiven und Medien ausklappen und markieren.
-- Optional nach Namensbestandteil oder maximaler MB-Groesse filtern.
-- Sinnvolle Outputformate ueber `Output` anhaken. Die Liste richtet sich nach den Inputs.
-- Ueber `Zahnrad` Spezialoperationen und Namenskonventionen aktivieren.
-- Mit `+ Zeile` weitere Konvertierungsregeln hinzufuegen.
-- Unten Output im selben Ordner und rekursive Suche steuern.
-- `Go` startet, `Stop` fordert Abbruch an.
-- Logs werden nicht in der GUI angezeigt, sondern als `conversion_log_YYYYMMDD_HHMMSS.txt` im Outputordner gespeichert.
+Jedes Werkzeug ist ein Tab und folgt demselben Fluss:
 
-## Direkt nutzbar
+1. **Quelle** wählen (Ordner oder mehrere Dateien) und filtern
+   (Dateitypen, Namensbestandteil, max. Größe, Unterordner ja/nein).
+2. **Einstellungen** setzen, Zielordner wählen (Unterordner neben der Quelle
+   oder eigener Ordner).
+3. **Vorschau** klicken → der komplette Plan (Quelle → Ergebnis) erscheint als
+   Tabelle. Es wird noch nichts verändert.
+4. **Ausführen** → Fortschrittsbalken, Live-Log unten im Fenster, Status pro
+   Zeile. Zusätzlich wird eine Logdatei `lauf_log_…txt` im Zielordner abgelegt.
+   **Stop** bricht sauber ab.
 
-Ohne Zusatzsoftware sind im Prototyp vor allem diese Funktionen robust:
+Bestehende Dateien werden nie überschrieben (automatisch `_2`, `_3`, …).
+Wiederkehrende Aufgaben lassen sich über *Datei → Preset speichern/laden* als
+JSON ablegen.
 
-- CSV/TSV/JSON untereinander konvertieren.
-- Dateien in ZIP packen.
-- Gleiche Dateiendung kopieren.
+## Die Werkzeuge
 
-Mit `Pillow`:
+### Tabellen (das Herzstück)
+Preislisten, Stücklisten und Lieferantenlisten wandeln und aufbereiten.
 
-- Bilder zwischen JPG, PNG, TIFF, WebP und PDF konvertieren.
-- Bilder komprimieren.
-- Demo-Zone weiss ueberdecken.
-- Outputnamen per Suchen/Ersetzen, Praefix und Suffix vereinheitlichen.
-- Optional auch Inputdateien nach derselben Namensregel umbenennen.
+- **Lesen:** CSV, TSV, TXT (Trennzeichen und Encoding werden automatisch
+  erkannt, auch cp1252-Altdaten), XLSX, JSON, XML
+- **Schreiben:** CSV, TSV, **XLSX** (eigener Writer auf zipfile-Basis, öffnet
+  sauber in Excel, Kopfzeile fett, Spaltenbreiten angepasst), JSON, XML,
+  HTML-Bericht, Markdown
+- **Aufbereitung:** Werte trimmen, Leerzeilen/Duplikate entfernen,
+  Dezimalzeichen normalisieren (`1.234,50` ↔ `1234.50`), Spalten auswählen und
+  umbenennen (`Alt>Neu; SKU`), mehrere Dateien zu einer Tabelle
+  zusammenführen (mit Spalte „Quelle")
 
-Installation:
+### CAD
+Neutrale 3D-Formate konvertieren — mit **eigenem B-Rep-Tessellierungs-Kern**
+für STEP (Part-21-Parser, Flächen-Evaluatoren für Ebene/Zylinder/Kegel/Kugel/
+Torus/NURBS/Extrusion/Rotation, Trimmung im UV-Raum, Ear-Clipping mit
+Verfeinerung — alles Standardbibliothek).
 
-```powershell
-pip install pillow
-```
+- **Lesen:** STL (ASCII/binär), OBJ, PLY (ASCII/binär), 3MF, **STEP** (AP203/214/242)
+- **Schreiben:** STL, OBJ, PLY, 3MF, GLB und eine **eigenständige HTML-3D-Ansicht**
+  (eigener WebGL-Viewer, läuft offline in jedem Browser — ideal zum Weiterleiten
+  an Kollegen ohne CAD-Lizenz)
+- **STEP/IGES-Prüfbericht:** Schema, Produkte, Einheiten, Autor, Entitäten-Statistik,
+  Geometrieart — als CSV/HTML für die Wareneingangsprüfung von CAD-Daten
+- Qualitätsstufen grob/mittel/fein für die STEP-Tessellierung
 
-Mit LibreOffice im PATH:
+Grenzen (ehrlich): Native Formate wie SLDPRT/IPT/eDrawings enthalten
+proprietäre, undokumentierte Kernel-Daten (Parasolid/ShapeManager) — die kann
+ohne Hersteller-Kernel niemand lesen. Praxis-Tipp: beim Lieferanten STEP oder
+STL anfordern; eDrawings selbst kann Teile als STL speichern. STEP-Tessellierung
+liefert ein Sichtmodell/Fertigungs-Mesh, kein exaktes B-Rep;
+Baugruppen-Transformationen werden nicht angewendet.
 
-- DOC/DOCX/XLS/XLSX/PPT/PPTX/ODT/ODS/ODP nach PDF oder moderne Office-Formate konvertieren.
+### Umbenennen
+Suchen/Ersetzen (optional Regex), Präfix/Suffix, Nummerierung,
+Groß-/Kleinschreibung, Änderungsdatum voranstellen. Vorher/Nachher in der
+Vorschau, Journal-Datei je Lauf und **Rückgängig**-Button.
 
-Mit FreeCADCmd im PATH:
+### Packen
+Jede Datei einzeln zippen, alles als ZIP-/TAR.GZ-Lieferantenpaket bündeln oder
+Archive entpacken (ZIP, TAR, TGZ, GZ, BZ2, XZ) — mit Schutz gegen unsichere
+Pfade und optionalem Glätten der Ordnerstruktur.
 
-- Einige 3D-CAD-Formate nach STEP/STP/STL/OBJ/IFC exportieren, soweit FreeCAD den Import unterstuetzt.
+### Ordnen
+Downloads und Lieferantenordner aufräumen: nach Dateityp oder Datum (JJJJ-MM)
+in Unterordner sortieren, verstreute Dateien flach in einen Zielordner
+zusammenführen, leere Unterordner entfernen — wahlweise kopieren statt
+verschieben, mit Journal und **Rückgängig**.
 
-## Formatgruppen
+### Inventar
+Lieferantenpaket dokumentieren: Manifest mit Pfad, Typ, Größe, Änderungsdatum,
+SHA-256 und **Duplikat-Erkennung** — als CSV, HTML-Bericht und/oder XLSX.
+Optional eine `SHA256SUMS.txt` im Standardformat für die Übergabe.
 
-- CAD 3D Native: SolidWorks, CATIA, Inventor, NX/Creo-nahe Dateitypen und weitere native CAD-Endungen.
-- CAD 3D Neutral: STEP/STP, IGES/IGS, JT, Parasolid, SAT/SAB, STL, OBJ, 3MF, IFC, GLB/GLTF.
-- CAD 2D: DWG, DXF, DWF/DWFX, DGN, HPGL/PLT.
-- CAM/NC: NC, CNC, G-Code, TAP, DRL.
-- Elektronik: Gerber, KiCad PCB, BRD, SCH, DSN.
-- Tabellen/ERP: CSV, TSV, JSON, XML, YAML, XLS/XLSX/XLSM/XLSB, ODS, MDB/ACCDB, SQLite/DB, Parquet.
-- MS Office: Word, Excel, PowerPoint, Visio und OpenDocument-Formate.
-- Dokumente/Text: TXT, MD, HTML, XHTML, XML, EML, MSG, TEX.
-- Bilder: JPG, PNG, TIFF, WebP, HEIC/HEIF, AVIF, BMP, GIF, PSD, RAW-nahe Formate.
-- Vektor/Print: SVG, EPS, AI, CDR, PS, INDD.
-- PDF: PDF in PDF, Bilder, Text oder ZIP.
-- Archive: ZIP, 7Z, RAR, TAR, TGZ, GZ, BZ2, XZ.
-- Medien: MP4, MOV, AVI, WMV, WebM, MP3, WAV.
+### E-Mail
+Anhänge aus `.eml`-Dateien (Export aus Outlook/Thunderbird) gesammelt
+extrahieren (optional ein Unterordner pro Mail) — oder Mails komplett
+archivieren: **als HTML** (eingebettete Bilder werden als Data-URIs
+mitgenommen, die Datei ist allein lebensfähig) oder als lesbare Textdatei.
 
-Nicht jedes Format ist ohne Zusatzsoftware direkt konvertierbar. Die GUI zeigt bewusst den Einkaufsbedarf breit an; die eigentliche Umsetzung haengt je Format von Backends wie LibreOffice, FreeCAD, ODA, ImageMagick, Ghostscript, FFmpeg oder Hersteller-CAD ab.
+### Text/Encoding
+Encoding (UTF-8, UTF-8-BOM, cp1252, latin-1) und Zeilenenden (CRLF/LF) für
+ERP-Importe vereinheitlichen. Quell-Encoding wird automatisch erkannt.
+
+## Bewusst nicht enthalten
+
+Diese Version verspricht nur, was sie ohne Installationen hält. Nicht enthalten
+sind deshalb: native CAD-Formate (SLDPRT/IPT/eDrawings — proprietäre
+Kernel-Daten), DWG/DXF-Geometrie, Office→PDF, Bildbearbeitung,
+RAR/7z-Entpacken, Medien-Konvertierung.
 
 ## Tests
 
 ```powershell
-python data_converter_gui.py --self-test
 python test_converter_backend.py
 ```
 
-Fuer manuelle GUI-Tests liegen einfache Mockdateien unter `mock_files/`. Die STEP/DXF-Dateien dort sind Platzhalter fuer UI-, Filter-, ZIP- und Kopierlaeufe, nicht fuer echte CAD-Geometriepruefung.
+```powershell
+python data_converter_gui.py --self-test
+```
 
-## Empfehlungen fuer den Einkauf
+Beispieldaten für manuelle Tests liegen unter `mock_files/`.
 
-- `STEP`/`STP`: bester neutraler Standard fuer 3D-CAD-Austausch.
-- `PDF`: Zeichnungen, Spezifikationen, Angebote, Freigaben.
-- `XLSX`: editierbare Preislisten, Lieferantenlisten, Stuecklisten.
-- `CSV`: robuste Datenuebergabe an ERP, PIM, BI und Skripte.
-- `ZIP`: Lieferantenpakete gesammelt und nachvollziehbar ablegen.
-- `PNG`/`JPG`/`WebP`: Bilder, Etiketten, Screenshots, Shopdaten.
+## Projektstruktur
 
-## Was geht sonst noch?
-
-Technisch sinnvoll erweiterbar sind:
-
-- PDF schwaerzen/weissen nach frei definierter Zone.
-- PDF splitten/mergen/komprimieren.
-- Bilder skalieren, Wasserzeichen entfernen/setzen, DPI normalisieren.
-- Archive entpacken, neu zippen, Struktur vereinheitlichen.
-- CAD-Daten vereinheitlichen: native Formate nach STEP, Zeichnungen nach PDF/DXF.
-- Tabellen normalisieren: Spaltenmapping, Duplikate, Zeichensatz, Dezimaltrennzeichen.
-- Office-Pakete automatisch als PDF/A archivieren.
-
-Native CAD-Formate wie SolidWorks, Inventor, CATIA, NX oder Creo sind lizenz- und kernelabhaengig. Fuer eine produktive Einkaufsversion empfiehlt sich ein klar gewaehltes Backend: Hersteller-CAD, FreeCAD fuer offene Formate, ODA fuer DWG/DXF oder ein kommerzieller Batch-Konverter.
+- `data_converter_gui.py` — Einstiegspunkt
+- `converter_app/gui.py` — Oberfläche (tkinter/ttk)
+- `converter_app/tabular.py` — Tabellen lesen/aufbereiten/schreiben
+- `converter_app/xlsx_io.py` — XLSX-Reader/-Writer (zipfile + ElementTree)
+- `converter_app/cad_io.py` — STL/OBJ/PLY/3MF/GLB lesen & schreiben, HTML-3D-Viewer, STEP/IGES-Bericht
+- `converter_app/step_mesh.py` — STEP-B-Rep-Tessellierungs-Kern
+- `converter_app/filetools.py` — Umbenennen, Archive, Ordnen, Inventar, EML, Encoding
+- `converter_app/selftest.py` — Kurz-Selbsttest ohne GUI

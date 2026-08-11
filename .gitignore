@@ -2,4 +2,6 @@ __pycache__/
 *.py[cod]
 .venv/
 conversion_log_*.txt
+lauf_log_*.txt
+_umbenennen_journal_*.json
 *.tmp
