@@ -495,6 +495,74 @@ def split_pdf(path, target_dir, ranges_text="", single_pages=True, log=None):
     return written
 
 
+def parse_page_order(text, total):
+    """Wie parse_page_ranges, aber Reihenfolge und Duplikate bleiben erhalten."""
+    text = text.strip()
+    if not text:
+        return list(range(total))
+    result = []
+    for chunk in text.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", chunk)
+        if match:
+            start, end = int(match.group(1)), int(match.group(2))
+            step = 1 if end >= start else -1
+            pages = range(start, end + step, step)
+        elif chunk.isdigit():
+            pages = [int(chunk)]
+        else:
+            raise PdfError(f"Ungültige Seitenangabe: „{chunk}“ (erwartet z. B. 3,1-2)")
+        for page in pages:
+            if 1 <= page <= total:
+                result.append(page - 1)
+    if not result:
+        raise PdfError("Die Seitenangabe trifft keine Seite.")
+    return result
+
+
+def rotate_pdf(path, target_path, angle, ranges_text="", log=None):
+    """Seiten um 90/180/270 Grad drehen (im Uhrzeigersinn)."""
+    if angle % 90:
+        raise PdfError("Drehwinkel muss ein Vielfaches von 90 sein.")
+    doc = PdfDocument(path)
+    pages = doc.pages()
+    indexes = set(parse_page_ranges(ranges_text, len(pages)))
+    writer = PdfWriter()
+    memo = {}
+    page_refs = []
+    rotated = 0
+    for index, (page_ref, inherited) in enumerate(pages):
+        new_ref = writer.import_page(doc, page_ref, inherited, memo)
+        page_refs.append(new_ref)
+        if index in indexes:
+            value, stream = writer.items[int(new_ref)]
+            current = doc.resolve(inherited.get("Rotate")) or value.get("Rotate") or 0
+            value["Rotate"] = (int(current) + int(angle)) % 360
+            writer.items[int(new_ref)] = (value, stream)
+            rotated += 1
+            if log:
+                log(f"GEDREHT: Seite {index + 1} um {angle}°")
+    writer.save(target_path, page_refs)
+    return rotated
+
+
+def reorder_pdf(path, target_path, order_text, log=None):
+    """Seiten in neuer Reihenfolge schreiben (z. B. „3,1-2“; Duplikate erlaubt)."""
+    doc = PdfDocument(path)
+    pages = doc.pages()
+    order = parse_page_order(order_text, len(pages))
+    writer = PdfWriter()
+    memo = {}
+    page_refs = [writer.import_page(doc, pages[i][0], pages[i][1], memo) for i in order]
+    writer.save(target_path, page_refs)
+    if log:
+        log(f"UMSORTIERT: {len(order)} Seiten in Reihenfolge {', '.join(str(i + 1) for i in order[:12])}"
+            + (" …" if len(order) > 12 else ""))
+    return len(order)
+
+
 def redact_pdf(path, target_path, zone, color="weiss", ranges_text="", log=None):
     """Zone (x, y, breite, hoehe in % von links oben) deckend überlagern.
 

@@ -4,7 +4,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from converter_app import cad_io, filetools, img_io, pdf_io, step_mesh, tabular, xlsx_io
+from converter_app import cad_io, filetools, iges_mesh, img_io, pdf_io, step_mesh, tabular, xlsx_io
 
 
 def test_xlsx_roundtrip(root):
@@ -378,6 +378,96 @@ def test_dxf_to_svg(root):
     assert count == 5
     assert "<line" in svg and "<circle" in svg and "<path" in svg
     assert "polygon" in svg and "A-100" in svg
+
+
+def _build_iges(entities):
+    def line(body, section, seq):
+        return f"{body:<72}{section}{seq:7d}"
+
+    def fmt(value):
+        return f"{value:.6g}" if isinstance(value, float) else str(value)
+
+    s_lines = [line("Test", "S", 1)]
+    g_body = "1H,,1H;,4HTest;"
+    g_lines = [line(g_body, "G", 1)]
+    d_lines, p_lines = [], []
+    for etype, params, form in entities:
+        pptr = len(p_lines) + 1
+        body = ",".join(fmt(v) for v in [etype] + params) + ";"
+        chunks = [body[i:i + 64] for i in range(0, len(body), 64)]
+        de_seq = len(d_lines) + 1
+        for chunk in chunks:
+            p_lines.append(f"{chunk:<64}{de_seq:8d}")
+        d1 = f"{etype:8d}{pptr:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}00000000"
+        d2 = f"{etype:8d}{0:8d}{0:8d}{len(chunks):8d}{form:8d}{'':24}{0:8d}"
+        d_lines.append(line(d1[:72], "D", de_seq))
+        d_lines.append(line(d2[:72], "D", de_seq + 1))
+    p_out = [line(pl[:72], "P", i + 1) for i, pl in enumerate(p_lines)]
+    t_body = f"S{len(s_lines):7d}G{len(g_lines):7d}D{len(d_lines):7d}P{len(p_out):7d}"
+    return "\n".join(s_lines + g_lines + d_lines + p_out + [line(t_body, "T", 1)]) + "\n"
+
+
+def test_iges_kernel(root):
+    import math
+    plate = (128, [1, 1, 1, 1, 0, 0, 1, 0, 0,
+                   0., 0., 1., 1., 0., 0., 1., 1., 1., 1., 1., 1.,
+                   0., 0., 0., 10., 0., 0., 0., 20., 0., 10., 20., 0.,
+                   0., 1., 0., 1.], 0)
+    axis = (110, [30., 0., 0., 30., 0., 1.], 0)          # DE 3
+    generatrix = (110, [35., 0., 0., 35., 0., 10.], 0)   # DE 5
+    revolution = (120, [3, 5, 0., 2 * math.pi], 0)
+    path = root / "teil.igs"
+    path.write_text(_build_iges([plate, axis, generatrix, revolution]), encoding="ascii")
+
+    mesh = iges_mesh.read_iges_mesh(path, quality="mittel")
+    assert len(mesh.faces) > 20, len(mesh.faces)
+    assert any(abs(v[0] - 10) < 1e-6 and abs(v[1] - 20) < 1e-6 for v in mesh.vertices), "Platte fehlt"
+    cylinder = [v for v in mesh.vertices if v[0] > 20]
+    radii = [math.hypot(v[0] - 30, v[1]) for v in cylinder]
+    assert radii and all(abs(r - 5) < 0.05 for r in radii), (min(radii), max(radii))
+    assert abs(max(v[2] for v in mesh.vertices) - 10) < 1e-6
+
+    via_cad = cad_io.read_mesh(path, quality="grob")
+    assert len(via_cad.faces) > 10
+
+
+def test_pdf_rotate_reorder(root):
+    src = root / "quelle.pdf"
+    src.write_bytes(_MINI_PDF)
+    rotated = root / "gedreht.pdf"
+    count = pdf_io.rotate_pdf(src, rotated, 90, ranges_text="1")
+    assert count == 1 and pdf_io.pdf_page_count(rotated) == 2
+    assert b"/Rotate 90" in rotated.read_bytes()
+
+    reordered = root / "sortiert.pdf"
+    count = pdf_io.reorder_pdf(src, reordered, "2,1,2")
+    assert count == 3 and pdf_io.pdf_page_count(reordered) == 3
+
+
+def test_image_crop(root):
+    data = bytearray()
+    for y in range(20):
+        for x in range(40):
+            data += bytes((255, 0, 0) if x < 20 else (0, 255, 0))
+    image = img_io.Image(40, 20, "RGB", data)
+    right_half = img_io.crop(image, (50, 0, 50, 100))
+    assert (right_half.width, right_half.height) == (20, 20)
+    assert bytes(right_half.data[:3]) == bytes((0, 255, 0))
+
+
+def test_split_zip_bundles(root):
+    src = root / "quelle"
+    src.mkdir()
+    for i in range(5):
+        (src / f"datei{i}.bin").write_bytes(b"x" * 400_000)   # 5 x ~0,4 MB
+    files = filetools.iter_files([src], recursive=True)
+    written = filetools.split_zip_bundles(files, root, "paket", 1, log=lambda m: None)
+    assert len(written) == 3, [w.name for w in written]       # 2+2+1 bei 1-MB-Limit
+    total = 0
+    for part in written:
+        with zipfile.ZipFile(part) as archive:
+            total += len(archive.namelist())
+    assert total == 5
 
 
 def main():

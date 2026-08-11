@@ -684,71 +684,11 @@ class StepTessellator:
 
     def _face_uv_triangles(self, surface, loops):
         uv_loops = []
-        wrapped = False
         for loop in loops:
             uvs = [surface.uv_of(p) for p in loop]
-            uvs, winding = _unwrap_loop(uvs, surface.u_period, surface.v_period)
-            if winding != (0, 0):
-                wrapped = True
+            uvs, _winding = _unwrap_loop(uvs, surface.u_period, surface.v_period)
             uv_loops.append(uvs)
-
-        if wrapped:
-            return self._grid_triangles(surface, uv_loops)
-
-        target = self._refine_target(surface)
-        outer = max(uv_loops, key=lambda l: abs(_polygon_area(l)))
-        holes = [l for l in uv_loops if l is not outer]
-        if _polygon_area(outer) < 0:
-            outer = outer[::-1]
-        holes = [h[::-1] if _polygon_area(h) > 0 else h for h in holes]
-        triangles = _triangulate_polygon(outer, holes)
-        if target:
-            triangles = _refine_triangles(triangles, target, _MAX_FACE_TRIS)
-        return triangles
-
-    def _refine_target(self, surface):
-        if not surface.curved_u and not surface.curved_v:
-            return None
-        chord = TWO_PI / self.segments
-        target_u = chord if surface.curved_u else float("inf")
-        target_v = chord if surface.curved_v else float("inf")
-        if surface.kind == "nurbs":
-            # NURBS-Domäne ist nicht in Radiant: Ziel = Domänenanteil
-            target_u = (surface.u_scale and 1.0 / (self.segments / 4)) or target_u
-            target_v = (surface.v_scale and 1.0 / (self.segments / 4)) or target_v
-        return (target_u, target_v)
-
-    def _grid_triangles(self, surface, uv_loops):
-        """Voll umlaufende Flächen (Zylinderwand, Torus, Kugelzone) als Band."""
-        all_u = [uv[0] for loop in uv_loops for uv in loop]
-        all_v = [uv[1] for loop in uv_loops for uv in loop]
-        if surface.u_period:
-            u_lo, u_hi = 0.0, surface.u_period
-        else:
-            u_lo, u_hi = min(all_u), max(all_u)
-        if surface.v_period and (max(all_v) - min(all_v)) > surface.v_period * 0.98:
-            v_lo, v_hi = 0.0, surface.v_period
-        else:
-            v_lo, v_hi = min(all_v), max(all_v)
-        if u_hi - u_lo < 1e-12 or v_hi - v_lo < 1e-12:
-            return []
-        n_u = max(4, int(round(self.segments * (u_hi - u_lo) / TWO_PI))) if surface.u_period \
-            else max(2, self.segments // 8)
-        if surface.curved_v:
-            span = (v_hi - v_lo) / (surface.v_period or TWO_PI)
-            n_v = max(4, int(round(self.segments * span)))
-        else:
-            n_v = 1
-        triangles = []
-        for i in range(n_u):
-            u_a = u_lo + (u_hi - u_lo) * i / n_u
-            u_b = u_lo + (u_hi - u_lo) * (i + 1) / n_u
-            for j in range(n_v):
-                v_a = v_lo + (v_hi - v_lo) * j / n_v
-                v_b = v_lo + (v_hi - v_lo) * (j + 1) / n_v
-                triangles.append(((u_a, v_a), (u_b, v_a), (u_b, v_b)))
-                triangles.append(((u_a, v_a), (u_b, v_b), (u_a, v_b)))
-        return triangles
+        return face_triangles_from_uv(surface, uv_loops, self.segments)
 
     # -- Gesamtablauf ------------------------------------------------------
 
@@ -773,7 +713,81 @@ class StepTessellator:
 
 # ---------------------------------------------------------------------------
 # UV-Geometrie: Entrollen, Fläche, Triangulierung, Verfeinerung
+# (Modulebene, damit auch der IGES-Kern sie nutzen kann)
 # ---------------------------------------------------------------------------
+
+def face_triangles_from_uv(surface, uv_loops, segments):
+    """Getrimmte Fläche aus (bereits entrollten) UV-Loops triangulieren."""
+    wrapped = False
+    for loop in uv_loops:
+        _re, winding = _unwrap_loop(loop, surface.u_period, surface.v_period)
+        if winding != (0, 0):
+            wrapped = True
+    if wrapped or not uv_loops:
+        return grid_triangles(surface, uv_loops, segments)
+    target = _refine_target(surface, segments)
+    outer = max(uv_loops, key=lambda l: abs(_polygon_area(l)))
+    holes = [l for l in uv_loops if l is not outer]
+    if _polygon_area(outer) < 0:
+        outer = outer[::-1]
+    holes = [h[::-1] if _polygon_area(h) > 0 else h for h in holes]
+    triangles = _triangulate_polygon(outer, holes)
+    if target:
+        triangles = _refine_triangles(triangles, target, _MAX_FACE_TRIS)
+    return triangles
+
+
+def _refine_target(surface, segments):
+    if not surface.curved_u and not surface.curved_v:
+        return None
+    chord = TWO_PI / segments
+    target_u = chord if surface.curved_u else float("inf")
+    target_v = chord if surface.curved_v else float("inf")
+    if surface.kind == "nurbs":
+        # NURBS-Domäne ist nicht in Radiant: Ziel = Domänenanteil
+        target_u = (surface.u_scale and 1.0 / (segments / 4)) or target_u
+        target_v = (surface.v_scale and 1.0 / (segments / 4)) or target_v
+    return (target_u, target_v)
+
+
+def grid_triangles(surface, uv_loops, segments, domain=None):
+    """Voll umlaufende Flächen (Zylinderwand, Torus, Kugelzone) als Band."""
+    all_u = [uv[0] for loop in uv_loops for uv in loop]
+    all_v = [uv[1] for loop in uv_loops for uv in loop]
+    if domain and not all_u:
+        u_lo, u_hi, v_lo, v_hi = domain
+    else:
+        if surface.u_period:
+            u_lo, u_hi = 0.0, surface.u_period
+        else:
+            u_lo, u_hi = min(all_u), max(all_u)
+        if surface.v_period and (max(all_v) - min(all_v)) > surface.v_period * 0.98:
+            v_lo, v_hi = 0.0, surface.v_period
+        else:
+            v_lo, v_hi = min(all_v), max(all_v)
+    if u_hi - u_lo < 1e-12 or v_hi - v_lo < 1e-12:
+        return []
+    if surface.u_period:
+        n_u = max(4, int(round(segments * (u_hi - u_lo) / TWO_PI)))
+    elif surface.curved_u:
+        n_u = max(8, segments // 4)
+    else:
+        n_u = max(2, segments // 8)
+    if surface.curved_v:
+        span = (v_hi - v_lo) / (surface.v_period or TWO_PI)
+        n_v = max(4, int(round(segments * span))) if surface.v_period else max(8, segments // 4)
+    else:
+        n_v = 1
+    triangles = []
+    for i in range(n_u):
+        u_a = u_lo + (u_hi - u_lo) * i / n_u
+        u_b = u_lo + (u_hi - u_lo) * (i + 1) / n_u
+        for j in range(n_v):
+            v_a = v_lo + (v_hi - v_lo) * j / n_v
+            v_b = v_lo + (v_hi - v_lo) * (j + 1) / n_v
+            triangles.append(((u_a, v_a), (u_b, v_a), (u_b, v_b)))
+            triangles.append(((u_a, v_a), (u_b, v_b), (u_a, v_b)))
+    return triangles
 
 def _unwrap_loop(uvs, u_period, v_period):
     """Periodische Koordinaten stetig machen; liefert (Loop, Windungszahlen)."""

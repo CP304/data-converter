@@ -257,6 +257,22 @@ def write_image(image, path):
 # Operationen
 # ---------------------------------------------------------------------------
 
+def crop(image, zone):
+    """Zone (x, y, Breite, Höhe in % von links oben) ausschneiden."""
+    zx, zy, zw, zh = (max(0.0, min(100.0, float(v))) / 100.0 for v in zone)
+    x0 = int(image.width * zx)
+    y0 = int(image.height * zy)
+    width = max(1, min(int(image.width * zw), image.width - x0))
+    height = max(1, min(int(image.height * zh), image.height - y0))
+    channels = image.channels
+    out = bytearray(width * height * channels)
+    for row in range(height):
+        src = ((y0 + row) * image.width + x0) * channels
+        dst = row * width * channels
+        out[dst:dst + width * channels] = image.data[src:src + width * channels]
+    return Image(width, height, image.mode, out, image.dpi)
+
+
 def resize(image, new_width, new_height=None):
     """Bilinear skalieren; new_height leer = proportional."""
     new_width = max(1, int(new_width))

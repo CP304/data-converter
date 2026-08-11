@@ -18,7 +18,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
-MESH_READ_EXTS = [".stl", ".obj", ".ply", ".3mf", ".step", ".stp"]
+MESH_READ_EXTS = [".stl", ".obj", ".ply", ".3mf", ".step", ".stp", ".iges", ".igs"]
 MESH_WRITE_EXTS = [".stl", ".obj", ".ply", ".3mf", ".glb", ".html"]
 BREP_EXTS = [".step", ".stp", ".iges", ".igs"]
 
@@ -51,6 +51,9 @@ def read_mesh(path, quality="mittel", log=None):
     if ext in (".step", ".stp"):
         from .step_mesh import read_step_mesh
         return read_step_mesh(path, quality=quality, log=log)
+    if ext in (".iges", ".igs"):
+        from .iges_mesh import read_iges_mesh
+        return read_iges_mesh(path, quality=quality, log=log)
     raise ValueError(f"Kein unterstütztes Mesh-Format: {ext}")
 
 

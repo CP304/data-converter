@@ -5,31 +5,34 @@ Tool** — konvertieren, umbenennen, packen, ordnen, prüfen. Keine Auswertungen
 keine Datenbank, kein Dashboard. Reine Python-Standardbibliothek, keine
 Installationen.
 
-Sinnvolle nächste Schritte, alle innerhalb dieser Vision:
+## Umgesetzt (Stand August 2026)
 
-## Bedienung
+### Bedienung
+- ✅ **Sitzung merken**: Quellen, Ziele und Einstellungen aller Tabs werden beim
+  Schließen gespeichert (`~/.einkauf_data_converter.json`) und beim Start
+  wiederhergestellt.
+- ✅ **Kontextmenü im Vorschau-Tree** (Rechtsklick): Datei öffnen, im Explorer
+  zeigen, Zeile aus dem Plan nehmen — „Ausführen" arbeitet dann den
+  editierten Plan ab.
+- ✅ **Preset-Schnellzugriff**: „Presets ▾" in der Kopfzeile mit den zuletzt
+  verwendeten Presets.
 
-- **Zuletzt verwendete Quellen/Ziele** je Tab merken (schneller Wiedereinstieg)
-- **Kontextmenü im Vorschau-Tree**: Datei öffnen, Ordner öffnen, Zeile aus dem
-  Plan nehmen
-- **Presets als Schnellzugriff** in der Kopfzeile (die drei Wochen-Standardläufe
-  mit einem Klick)
+### Automatisierung
+- ✅ **Headless-Lauf** für den Windows-Taskplaner:
+  `python data_converter_gui.py --preset lauf.json --run`
+- ✅ **Watch-Ordner**: `--preset lauf.json --watch 30` beobachtet die Quelle des
+  ersten Ketten-Werkzeugs und führt die Kette aus, sobald neue Dateien stabil
+  angekommen sind.
+- ✅ **Werkzeug-Ketten**: *Datei → Kette ausführen…* führt mehrere Tabs
+  nacheinander aus; die Kette wird in Presets mitgespeichert.
 
-## Automatisierung (Dateihandling ohne Klicks)
-
-- **Headless-Lauf**: `python data_converter_gui.py --preset lauf.json --run`
-  ohne Fenster → planbar über den Windows-Taskplaner
-- **Watch-Ordner**: Eingangsordner beobachten, Preset automatisch anwenden
-  (Lieferantenpaket kommt an → entpacken → ordnen → Inventar)
-- **Werkzeug-Ketten**: mehrere Tabs als eine Kette speichern und in einem
-  Rutsch ausführen
-
-## Formate abrunden
-
-- **IGES → Mesh** im Tessellierungs-Kern (Flächen-Evaluatoren existieren schon)
-- **PDF**: Seiten drehen und Reihenfolge ändern
-- **Bilder**: Zuschneiden (feste Ränder/Zone)
-- **Packen**: ZIP in Teile fester Größe splitten (E-Mail-Anhang-Limits)
+### Formate
+- ✅ **IGES → Mesh** im Tessellierungs-Kern (NURBS-Flächen 128, Rotation 120,
+  Extrusion 122, getrimmte Flächen 144/142, Transformationen 124).
+- ✅ **PDF**: Seiten drehen (90/180/270) und Reihenfolge ändern (`3,1-2`).
+- ✅ **Bilder**: Zuschneiden per Zone (% von links oben).
+- ✅ **Packen**: Dateien auf mehrere unabhängige ZIPs mit Maximalgröße verteilen
+  (E-Mail-Anhang-Limits).
 
 ## Bewusste Grenzen (bleiben)
 

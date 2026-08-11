@@ -19,6 +19,7 @@ from tkinter import ttk, filedialog, messagebox
 
 import os
 import subprocess
+import sys
 
 from . import APP_TITLE, __version__, cad_io, filetools, img_io, pdf_io, tabular
 
@@ -239,6 +240,7 @@ class ToolTab(ttk.Frame):
         super().__init__(parent, padding=(12, 12, 12, 0))
         self.app = app
         self.plan = []
+        self.plan_consumed = True
         self.run_cfg = {}
         self.log_dir = None
         self.tree_items = []
@@ -285,24 +287,65 @@ class ToolTab(ttk.Frame):
         self.tree.tag_configure("odd", background="#f6f8fc")
         self.tree.tag_configure("ok", foreground="#0f7b3d")
         self.tree.tag_configure("err", foreground="#c22a2a")
-        self.tree.bind("<Double-1>", self._open_item_location)
+        self.tree.bind("<Double-1>", lambda _e: self._context_show())
+        self.context_menu = tk.Menu(self, tearoff=False)
+        self.context_menu.add_command(label="Datei öffnen", command=self._context_open)
+        self.context_menu.add_command(label="Im Explorer zeigen", command=self._context_show)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="Zeile aus dem Plan nehmen", command=self._context_remove)
+        self.tree.bind("<Button-3>", self._context_popup)
 
-    def _open_item_location(self, _event):
+    def _selected_index(self):
         selection = self.tree.selection()
-        if not selection or selection[0] not in self.tree_items:
-            return
-        item = self.plan[self.tree_items.index(selection[0])]
-        payload = item.payload
+        if selection and selection[0] in self.tree_items:
+            return self.tree_items.index(selection[0])
+        return None
+
+    def _selected_path(self):
+        index = self._selected_index()
+        if index is None:
+            return None
+        payload = self.plan[index].payload
         path = payload if isinstance(payload, Path) else \
             payload[0] if isinstance(payload, tuple) and isinstance(payload[0], Path) else None
-        if path and path.exists():
+        return path if path and path.exists() else None
+
+    def _context_popup(self, event):
+        row = self.tree.identify_row(event.y)
+        if row:
+            self.tree.selection_set(row)
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+
+    def _context_open(self):
+        path = self._selected_path()
+        if path:
+            os.startfile(str(path))
+
+    def _context_show(self):
+        path = self._selected_path()
+        if path:
             subprocess.Popen(["explorer", "/select,", str(path)])
+
+    def _context_remove(self):
+        index = self._selected_index()
+        if index is None:
+            return
+        old_len = len(self.plan)
+        if isinstance(self.run_cfg, dict):          # parallele Listen synchron halten
+            for key in ("plan", "dirs", "files"):
+                seq = self.run_cfg.get(key)
+                if isinstance(seq, list) and len(seq) == old_len:
+                    del seq[index]
+        self.tree.delete(self.tree_items.pop(index))
+        del self.plan[index]
+        self.count_var.set(f"{len(self.plan)} Aktion(en) geplant (Zeile entfernt).")
 
     # -- Vorschau ----------------------------------------------------------
 
     def refresh_plan(self):
         """Plan neu berechnen und im Treeview anzeigen. Wirft ValueError."""
         self.plan = self.make_plan()
+        self.plan_consumed = False
         self.tree.delete(*self.tree.get_children())
         self.tree_items = []
         for idx, item in enumerate(self.plan):
@@ -561,8 +604,8 @@ CAD_QUALITY = ["grob", "mittel", "fein"]
 class CadTab(ToolTab):
     key = "cad"
     title = "CAD"
-    hint = "STL · OBJ · PLY · 3MF · STEP → STL · OBJ · PLY · 3MF · GLB · HTML-3D"
-    default_exts = "stl, obj, ply, 3mf, step, stp"
+    hint = "STL · OBJ · PLY · 3MF · STEP · IGES → STL · OBJ · PLY · 3MF · GLB · HTML-3D"
+    default_exts = "stl, obj, ply, 3mf, step, stp, iges, igs"
     target_subfolder = "_cad"
 
     def build_options(self, parent):
@@ -590,7 +633,7 @@ class CadTab(ToolTab):
             self.format_vars[ext] = var
             ttk.Checkbutton(row2, text=labels[ext], variable=var,
                             style="Card.TCheckbutton").pack(side="left", padx=(8, 0))
-        self.quality_combo = _labeled(row2, "STEP-Qualität",
+        self.quality_combo = _labeled(row2, "STEP/IGES-Qualität",
                                       lambda p: ttk.Combobox(p, values=CAD_QUALITY, width=8, state="readonly"),
                                       padx=(18, 0))
         self.quality_combo.set("mittel")
@@ -610,7 +653,7 @@ class CadTab(ToolTab):
                   style="CardSub.TLabel").pack(side="left", padx=(18, 0))
 
     def _mode_changed(self):
-        exts = {"konvertieren": "stl, obj, ply, 3mf, step, stp",
+        exts = {"konvertieren": "stl, obj, ply, 3mf, step, stp, iges, igs",
                 "bericht": "step, stp, iges, igs", "dxf": "dxf"}
         self.source.ext_var.set(exts[self.mode_var.get()])
 
@@ -736,10 +779,12 @@ class CadTab(ToolTab):
 # Tab: PDF
 # ---------------------------------------------------------------------------
 
-PDF_MODES = {"mergen": "Alle zu einer PDF zusammenführen",
-             "splitten": "Splitten (jede Seite einzeln)",
-             "auszug": "Auszug (Seitenbereich als eine PDF)",
-             "abdecken": "Zone abdecken (weiß/schwarz)"}
+PDF_MODES = {"mergen": "Zusammenführen",
+             "splitten": "Splitten (einzeln)",
+             "auszug": "Auszug",
+             "drehen": "Seiten drehen",
+             "umsortieren": "Umsortieren",
+             "abdecken": "Zone abdecken"}
 
 
 class PdfTab(ToolTab):
@@ -764,7 +809,14 @@ class PdfTab(ToolTab):
         ttk.Entry(row2, textvariable=self.bundle_var, width=20).pack(side="left", padx=(6, 14))
         ttk.Label(row2, text="Seiten (z. B. 1-3,7; leer = alle)", style="CardSub.TLabel").pack(side="left")
         self.range_var = tk.StringVar()
-        ttk.Entry(row2, textvariable=self.range_var, width=14).pack(side="left", padx=(6, 14))
+        ttk.Entry(row2, textvariable=self.range_var, width=12).pack(side="left", padx=(6, 14))
+        self.angle_combo = _labeled(row2, "Drehen um",
+                                    lambda p: ttk.Combobox(p, values=["90", "180", "270"], width=5,
+                                                           state="readonly"))
+        self.angle_combo.set("90")
+        ttk.Label(row2, text="Reihenfolge (z. B. 3,1-2)", style="CardSub.TLabel").pack(side="left")
+        self.order_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.order_var, width=10).pack(side="left", padx=(6, 14))
         ttk.Label(row2, text="Zone % (x, y, Breite, Höhe von links oben)", style="CardSub.TLabel").pack(side="left")
         self.zone_vars = [tk.StringVar(value=v) for v in ("5", "5", "40", "10")]
         for var in self.zone_vars:
@@ -795,14 +847,19 @@ class PdfTab(ToolTab):
         self.run_cfg = {"mode": mode, "files": files, "target_dir": target_dir,
                         "bundle": filetools.safe_filename(self.bundle_var.get().strip() or "zusammengefuehrt"),
                         "ranges": self.range_var.get().strip(), "zone": zone,
-                        "color": self.color_var.get()}
+                        "color": self.color_var.get(), "angle": int(self.angle_combo.get()),
+                        "order": self.order_var.get().strip()}
         if mode == "mergen":
             if len(files) < 2:
                 raise ValueError("Zum Mergen mindestens zwei PDFs wählen.")
             total = sum(p.stat().st_size for p in files)
             return [PlanItem(f"{len(files)} PDFs", filetools.format_size(total),
                              str(target_dir / (self.run_cfg["bundle"] + ".pdf")))]
+        if mode == "umsortieren" and not self.run_cfg["order"]:
+            raise ValueError("Bitte eine Reihenfolge angeben (z. B. 3,1-2).")
         labels = {"splitten": "jede Seite einzeln", "auszug": f"Auszug {self.run_cfg['ranges'] or 'alle'}",
+                  "drehen": f"um {self.run_cfg['angle']}° drehen",
+                  "umsortieren": f"Reihenfolge {self.run_cfg['order']}",
                   "abdecken": f"Zone abdecken ({self.run_cfg['color']})"}
         return [PlanItem(path.name, filetools.format_size(path.stat().st_size),
                          labels[mode], payload=path) for path in files]
@@ -831,6 +888,15 @@ class PdfTab(ToolTab):
                     written = pdf_io.split_pdf(path, cfg["target_dir"], cfg["ranges"],
                                                single_pages=False, log=ctx.log)
                     ctx.item(idx, "OK")
+                elif cfg["mode"] == "drehen":
+                    target = filetools.unique_path(cfg["target_dir"] / (path.stem + "_gedreht.pdf"))
+                    rotated = pdf_io.rotate_pdf(path, target, cfg["angle"], cfg["ranges"], log=ctx.log)
+                    ctx.item(idx, f"OK ({rotated})")
+                    ctx.log(f"OK: {target.name} ({rotated} Seite(n) gedreht)", "ok")
+                elif cfg["mode"] == "umsortieren":
+                    target = filetools.unique_path(cfg["target_dir"] / (path.stem + "_sortiert.pdf"))
+                    count = pdf_io.reorder_pdf(path, target, cfg["order"], log=ctx.log)
+                    ctx.item(idx, f"OK ({count})")
                 else:
                     target = filetools.unique_path(cfg["target_dir"] / (path.stem + "_abgedeckt.pdf"))
                     covered = pdf_io.redact_pdf(path, target, cfg["zone"], cfg["color"],
@@ -845,7 +911,8 @@ class PdfTab(ToolTab):
     def option_state(self):
         return {"mode": self.mode_var.get(), "bundle": self.bundle_var.get(),
                 "ranges": self.range_var.get(), "zone": [v.get() for v in self.zone_vars],
-                "color": self.color_var.get()}
+                "color": self.color_var.get(), "angle": self.angle_combo.get(),
+                "order": self.order_var.get()}
 
     def apply_option_state(self, state):
         self.mode_var.set(state.get("mode", "mergen"))
@@ -854,6 +921,8 @@ class PdfTab(ToolTab):
         for var, value in zip(self.zone_vars, state.get("zone", ["5", "5", "40", "10"])):
             var.set(value)
         self.color_var.set(state.get("color", "weiss"))
+        self.angle_combo.set(state.get("angle", "90"))
+        self.order_var.set(state.get("order", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +954,14 @@ class BilderTab(ToolTab):
         self.mark_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.mark_var, width=18).pack(side="left", padx=(6, 0))
 
+        row2 = ttk.Frame(parent, style="Card.TFrame")
+        row2.pack(fill="x", pady=(8, 0))
+        ttk.Label(row2, text="Zuschneiden % (x, y, Breite, Höhe von links oben; leer = aus)",
+                  style="CardSub.TLabel").pack(side="left")
+        self.crop_vars = [tk.StringVar() for _ in range(4)]
+        for var in self.crop_vars:
+            ttk.Entry(row2, textvariable=var, width=5).pack(side="left", padx=(4, 0))
+
     def make_plan(self):
         files = self.source.collect()
         formats = [ext for ext, var in ((".png", self.png_var), (".bmp", self.bmp_var)) if var.get()]
@@ -901,10 +978,18 @@ class BilderTab(ToolTab):
                 dpi = max(1, int(self.dpi_var.get()))
             except ValueError:
                 raise ValueError("DPI muss eine ganze Zahl sein.")
+        crop = None
+        crop_values = [v.get().strip() for v in self.crop_vars]
+        if any(crop_values):
+            try:
+                crop = [float(v.replace(",", ".")) for v in crop_values]
+            except ValueError:
+                raise ValueError("Zuschneiden: alle vier Werte als Zahlen angeben (oder alle leer).")
         target_dir = self.target.resolve(self.source.base_dir())
         self.log_dir = target_dir
         self.run_cfg = {"files": files, "formats": formats, "target_dir": target_dir,
-                        "width": width, "dpi": dpi, "mark": self.mark_var.get().strip()}
+                        "width": width, "dpi": dpi, "mark": self.mark_var.get().strip(),
+                        "crop": crop}
         plan = []
         for path in files:
             size = filetools.format_size(path.stat().st_size)
@@ -925,6 +1010,8 @@ class BilderTab(ToolTab):
             try:
                 if path not in cache:
                     image = img_io.read_image(path)
+                    if cfg["crop"]:
+                        image = img_io.crop(image, cfg["crop"])
                     if cfg["width"] and image.width > cfg["width"]:
                         image = img_io.resize(image, cfg["width"])
                     if cfg["dpi"]:
@@ -945,7 +1032,7 @@ class BilderTab(ToolTab):
     def option_state(self):
         return {"png": self.png_var.get(), "bmp": self.bmp_var.get(),
                 "width": self.width_var.get(), "dpi": self.dpi_var.get(),
-                "mark": self.mark_var.get()}
+                "mark": self.mark_var.get(), "crop": [v.get() for v in self.crop_vars]}
 
     def apply_option_state(self, state):
         self.png_var.set(state.get("png", True))
@@ -953,6 +1040,8 @@ class BilderTab(ToolTab):
         self.width_var.set(state.get("width", ""))
         self.dpi_var.set(state.get("dpi", ""))
         self.mark_var.set(state.get("mark", ""))
+        for var, value in zip(self.crop_vars, state.get("crop", ["", "", "", ""])):
+            var.set(value)
 
 
 # ---------------------------------------------------------------------------
@@ -1103,8 +1192,9 @@ class RenameTab(ToolTab):
 
 PACK_MODES = {
     "einzeln": "Jede Datei einzeln zippen",
-    "zip": "Alles in ein ZIP-Paket",
-    "targz": "Alles in ein TAR.GZ-Paket",
+    "zip": "Ein ZIP-Paket",
+    "targz": "Ein TAR.GZ-Paket",
+    "splitzip": "Mehrere ZIPs mit max. Größe",
     "entpacken": "Archive entpacken",
 }
 
@@ -1132,6 +1222,9 @@ class PackTab(ToolTab):
         self.flatten_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="Ordnerstruktur glätten (alles auf eine Ebene)",
                         variable=self.flatten_var, style="Card.TCheckbutton").pack(side="left")
+        ttk.Label(row2, text="max. MB je Teil", style="CardSub.TLabel").pack(side="left", padx=(16, 6))
+        self.split_mb_var = tk.StringVar(value="20")
+        ttk.Entry(row2, textvariable=self.split_mb_var, width=6).pack(side="left")
 
     def _mode_changed(self):
         if self.mode_var.get() == "entpacken" and not self.source.ext_var.get().strip():
@@ -1145,10 +1238,21 @@ class PackTab(ToolTab):
         base = self.source.base_dir()
         target_dir = self.target.resolve(base)
         bundle_name = filetools.safe_filename(self.bundle_var.get().strip() or "Lieferantenpaket")
+        try:
+            split_mb = max(1, int(self.split_mb_var.get()))
+        except ValueError:
+            raise ValueError("„max. MB je Teil“ muss eine ganze Zahl sein.")
         self.run_cfg = {"mode": mode, "files": files, "base": base, "target_dir": target_dir,
-                        "bundle": bundle_name, "flatten": self.flatten_var.get()}
+                        "bundle": bundle_name, "flatten": self.flatten_var.get(),
+                        "split_mb": split_mb}
         self.log_dir = target_dir
         plan = []
+        if mode == "splitzip":
+            total = sum(p.stat().st_size for p in files)
+            parts = max(1, -(-total // (split_mb * 1024 * 1024)))
+            plan.append(PlanItem(f"{len(files)} Datei(en)", filetools.format_size(total),
+                                 f"≈ {parts} ZIP-Teil(e) à max. {split_mb} MB → {target_dir}"))
+            return plan
         if mode == "einzeln":
             for path in files:
                 plan.append(PlanItem(path.name, filetools.format_size(path.stat().st_size),
@@ -1168,6 +1272,12 @@ class PackTab(ToolTab):
         cfg = self.run_cfg
         cfg["target_dir"].mkdir(parents=True, exist_ok=True)
         mode = cfg["mode"]
+        if mode == "splitzip":
+            written = filetools.split_zip_bundles(cfg["files"], cfg["target_dir"], cfg["bundle"],
+                                                  cfg["split_mb"], log=ctx.log,
+                                                  stopped=ctx.stopped, progress=ctx.progress)
+            ctx.item(0, f"OK ({len(written)} Teile)")
+            return
         if mode in ("zip", "targz"):
             ext = ".zip" if mode == "zip" else ".tar.gz"
             target = cfg["target_dir"] / (cfg["bundle"] + ext)
@@ -1192,12 +1302,14 @@ class PackTab(ToolTab):
             ctx.progress(idx + 1, len(self.plan))
 
     def option_state(self):
-        return {"mode": self.mode_var.get(), "bundle": self.bundle_var.get(), "flatten": self.flatten_var.get()}
+        return {"mode": self.mode_var.get(), "bundle": self.bundle_var.get(),
+                "flatten": self.flatten_var.get(), "split_mb": self.split_mb_var.get()}
 
     def apply_option_state(self, state):
         self.mode_var.set(state.get("mode", "zip"))
         self.bundle_var.set(state.get("bundle", "Lieferantenpaket"))
         self.flatten_var.set(state.get("flatten", False))
+        self.split_mb_var.set(state.get("split_mb", "20"))
 
 
 # ---------------------------------------------------------------------------
@@ -1555,19 +1667,63 @@ TAB_CLASSES = [TabellenTab, CadTab, PdfTab, BilderTab, RenameTab, PackTab, Ordne
 # Hauptfenster
 # ---------------------------------------------------------------------------
 
+SETTINGS_PATH = Path.home() / ".einkauf_data_converter.json"
+
+
 class DataConverterApp:
-    def __init__(self, root):
+    def __init__(self, root, restore_session=True):
         self.root = root
         self.root.title(f"{APP_TITLE} {__version__}")
         self.queue = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = None
         self.status_var = tk.StringVar(value="Bereit")
+        self.recent_presets = []
+        self.chain_keys = []
 
         self._configure_style()
         self._build_menu()
         self._build_ui()
+        if restore_session:
+            self._load_settings()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(80, self._drain_queue)
+
+    # -- Sitzung merken ----------------------------------------------------
+
+    def _load_settings(self):
+        try:
+            state = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        for tab in self.tabs:
+            if tab.key in state.get("tabs", {}):
+                try:
+                    tab.set_state(state["tabs"][tab.key])
+                except Exception:
+                    continue
+        index = state.get("active_tab", 0)
+        if 0 <= index < len(self.tabs):
+            self.notebook.select(index)
+        self.recent_presets = [p for p in state.get("recent_presets", []) if Path(p).exists()]
+        self.chain_keys = state.get("chain", [])
+        self._refresh_preset_menu()
+
+    def _save_settings(self):
+        state = {
+            "tabs": {tab.key: tab.get_state() for tab in self.tabs},
+            "active_tab": self.notebook.index(self.notebook.select()),
+            "recent_presets": self.recent_presets[:8],
+            "chain": self.chain_keys,
+        }
+        try:
+            SETTINGS_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _on_close(self):
+        self._save_settings()
+        self.root.destroy()
 
     # -- Styling -----------------------------------------------------------
 
@@ -1615,7 +1771,9 @@ class DataConverterApp:
         file_menu.add_command(label="Preset speichern…", command=self.save_preset)
         file_menu.add_command(label="Preset laden…", command=self.load_preset)
         file_menu.add_separator()
-        file_menu.add_command(label="Beenden", command=self.root.destroy)
+        file_menu.add_command(label="Kette ausführen…", command=self.chain_dialog)
+        file_menu.add_separator()
+        file_menu.add_command(label="Beenden", command=self._on_close)
         menubar.add_cascade(label="Datei", menu=file_menu)
         help_menu = tk.Menu(menubar)
         help_menu.add_command(label="Funktionsumfang", command=self.show_capabilities)
@@ -1635,6 +1793,11 @@ class DataConverterApp:
                  bg=HEADER_BG, fg="#a9b8d4", font=("Segoe UI", 9)).pack(anchor="w")
         tk.Label(header, textvariable=self.status_var, bg=HEADER_BG, fg="#7ee2a8",
                  font=FONT_BOLD).pack(side="right", padx=18)
+        self.preset_button = ttk.Menubutton(header, text="Presets ▾")
+        self.preset_button.pack(side="right", pady=10)
+        self.preset_menu = tk.Menu(self.preset_button, tearoff=False)
+        self.preset_button.configure(menu=self.preset_menu)
+        self._refresh_preset_menu()
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
@@ -1682,7 +1845,10 @@ class DataConverterApp:
             return
         tab = self.current_tab()
         try:
-            tab.refresh_plan()
+            # Vorhandener (ggf. per Kontextmenü editierter) Plan zählt; nach einem
+            # Lauf oder ohne Vorschau wird neu berechnet.
+            if not tab.plan or getattr(tab, "plan_consumed", True):
+                tab.refresh_plan()
         except ValueError as exc:
             messagebox.showwarning(APP_TITLE, str(exc))
             return
@@ -1739,6 +1905,9 @@ class DataConverterApp:
             kind = message[0]
             if kind == "log":
                 self.log_line(message[1], message[2])
+            elif kind == "tab":
+                self.active_tab = next(t for t in self.tabs if t.key == message[1])
+                self.notebook.select(self.tabs.index(self.active_tab))
             elif kind == "item":
                 self.active_tab.set_item_status(message[1], message[2])
             elif kind == "progress":
@@ -1754,8 +1923,9 @@ class DataConverterApp:
             elif kind == "state":
                 self.run_button.config(state="normal")
                 self.stop_button.config(state="disabled")
-                if hasattr(self, "active_tab"):
-                    self.active_tab.after_run()
+                for tab in self.tabs:
+                    tab.plan_consumed = True
+                    tab.after_run()
         self.root.after(80, self._drain_queue)
 
     # -- Presets -----------------------------------------------------------
@@ -1769,14 +1939,18 @@ class DataConverterApp:
             "app": APP_TITLE, "version": __version__,
             "active_tab": self.notebook.index(self.notebook.select()),
             "tabs": {tab.key: tab.get_state() for tab in self.tabs},
+            "chain": self.chain_keys,
         }
         Path(path).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         self.log_line(f"Preset gespeichert: {path}", "ok")
+        self._remember_preset(path)
 
     def load_preset(self):
         path = filedialog.askopenfilename(title="Preset laden", filetypes=[("Preset (JSON)", "*.json")])
-        if not path:
-            return
+        if path:
+            self.load_preset_file(path)
+
+    def load_preset_file(self, path):
         try:
             state = json.loads(Path(path).read_text(encoding="utf-8"))
             for tab in self.tabs:
@@ -1785,9 +1959,106 @@ class DataConverterApp:
             index = state.get("active_tab", 0)
             if 0 <= index < len(self.tabs):
                 self.notebook.select(index)
+            self.chain_keys = state.get("chain", self.chain_keys)
             self.log_line(f"Preset geladen: {path}", "ok")
+            self._remember_preset(path)
+            return state
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"Preset konnte nicht geladen werden:\n{exc}")
+            return None
+
+    def _remember_preset(self, path):
+        path = str(Path(path))
+        self.recent_presets = [path] + [p for p in self.recent_presets if p != path]
+        self.recent_presets = self.recent_presets[:8]
+        self._refresh_preset_menu()
+        self._save_settings()
+
+    def _refresh_preset_menu(self):
+        if not hasattr(self, "preset_menu"):
+            return
+        self.preset_menu.delete(0, "end")
+        if not self.recent_presets:
+            self.preset_menu.add_command(label="(noch keine Presets verwendet)", state="disabled")
+        for path in self.recent_presets:
+            self.preset_menu.add_command(label=Path(path).name,
+                                         command=lambda p=path: self.load_preset_file(p))
+
+    # -- Werkzeug-Kette ----------------------------------------------------
+
+    def chain_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title("Werkzeug-Kette ausführen")
+        window.configure(padx=16, pady=14, background=BG)
+        window.resizable(False, False)
+        ttk.Label(window, text="Diese Werkzeuge nacheinander ausführen (in Tab-Reihenfolge, "
+                               "jedes mit seinen aktuellen Einstellungen):").pack(anchor="w")
+        vars_by_key = {}
+        for tab in self.tabs:
+            var = tk.BooleanVar(value=tab.key in self.chain_keys)
+            vars_by_key[tab.key] = var
+            ttk.Checkbutton(window, text=tab.title, variable=var).pack(anchor="w", pady=2)
+
+        def start():
+            keys = [tab.key for tab in self.tabs if vars_by_key[tab.key].get()]
+            window.destroy()
+            if keys:
+                self.run_chain(keys)
+
+        buttons = ttk.Frame(window)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="Abbrechen", command=window.destroy).pack(side="left")
+        ttk.Button(buttons, text="Kette ausführen  ▶", style="Accent.TButton",
+                   command=start).pack(side="right")
+
+    def run_chain(self, keys):
+        if self.worker and self.worker.is_alive():
+            return
+        self.chain_keys = keys
+        tabs_to_run = []
+        for key in keys:
+            tab = next((t for t in self.tabs if t.key == key), None)
+            if tab is None:
+                continue
+            try:
+                tab.refresh_plan()
+                tabs_to_run.append(tab)
+            except ValueError as exc:
+                self.log_line(f"[{tab.title}] übersprungen: {exc}")
+        if not tabs_to_run:
+            messagebox.showwarning(APP_TITLE, "Kein Werkzeug der Kette hat einen ausführbaren Plan.")
+            return
+
+        self.stop_event.clear()
+        self.run_button.config(state="disabled")
+        self.stop_button.config(state="normal")
+        self.status_var.set(f"Kette läuft ({len(tabs_to_run)} Werkzeuge) …")
+        self.log_line(f"KETTE: {' → '.join(t.title for t in tabs_to_run)}", "ok")
+
+        def worker():
+            started = datetime.now()
+            try:
+                for tab in tabs_to_run:
+                    if self.stop_event.is_set():
+                        break
+                    self.queue.put(("tab", tab.key))
+                    log_path = None
+                    if tab.log_dir is not None:
+                        log_path = filetools.unique_path(
+                            Path(tab.log_dir) / f"lauf_log_{datetime.now():%Y%m%d_%H%M%S}.txt")
+                    ctx = RunContext(self.queue, self.stop_event, log_path)
+                    ctx.log(f"--- Kette: {tab.title} ---")
+                    try:
+                        tab.execute(ctx)
+                    except Exception as exc:
+                        ctx.log(f"ABBRUCH in {tab.title}: {exc}", "err")
+                seconds = (datetime.now() - started).total_seconds()
+                self.queue.put(("done", f"Kette fertig in {seconds:.1f} s."))
+            finally:
+                self.queue.put(("state", "idle"))
+
+        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker.start()
 
     # -- Hilfe -------------------------------------------------------------
 
@@ -1824,12 +2095,140 @@ def _enable_windows_dpi():
         pass
 
 
+class HeadlessContext:
+    """RunContext-Ersatz für Läufe ohne Fenster: Konsole + Logdatei."""
+
+    def __init__(self, log_path=None):
+        self.errors = 0
+        self.log_path = log_path
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(f"{APP_TITLE} {__version__} (headless)\n"
+                                f"Start: {datetime.now():%Y-%m-%d %H:%M:%S}\n\n", encoding="utf-8")
+
+    def stopped(self):
+        return False
+
+    def log(self, message, level="info"):
+        if level == "err":
+            self.errors += 1
+        print(f"  {message}")
+        if self.log_path is not None:
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{datetime.now():%H:%M:%S}  {message}\n")
+
+    def item(self, index, status):
+        pass
+
+    def progress(self, done, total):
+        pass
+
+
+def _headless_app(preset_path):
+    root = tk.Tk()
+    root.withdraw()
+    app = DataConverterApp(root, restore_session=False)
+    state = json.loads(Path(preset_path).read_text(encoding="utf-8"))
+    for tab in app.tabs:
+        if tab.key in state.get("tabs", {}):
+            tab.set_state(state["tabs"][tab.key])
+    keys = state.get("chain") or []
+    if not keys:
+        index = state.get("active_tab", 0)
+        keys = [app.tabs[index].key if 0 <= index < len(app.tabs) else app.tabs[0].key]
+    return root, app, keys
+
+
+def _headless_run(app, keys):
+    errors = 0
+    for key in keys:
+        tab = next((t for t in app.tabs if t.key == key), None)
+        if tab is None:
+            print(f"[?] Unbekanntes Werkzeug: {key}")
+            continue
+        try:
+            plan = tab.refresh_plan()
+        except ValueError as exc:
+            print(f"[{tab.title}] übersprungen: {exc}")
+            continue
+        print(f"[{tab.title}] {len(plan)} Aktion(en) …")
+        log_path = None
+        if tab.log_dir is not None:
+            log_path = filetools.unique_path(
+                Path(tab.log_dir) / f"lauf_log_{datetime.now():%Y%m%d_%H%M%S}.txt")
+        ctx = HeadlessContext(log_path)
+        try:
+            tab.execute(ctx)
+        except Exception as exc:
+            print(f"[{tab.title}] ABBRUCH: {exc}")
+            errors += 1
+            continue
+        errors += 1 if ctx.errors else 0
+    return errors
+
+
+def run_headless(preset_path, watch_interval=None):
+    """Preset ohne Fenster ausführen; optional als Watch-Ordner-Schleife."""
+    root, app, keys = _headless_app(preset_path)
+    try:
+        if watch_interval is None:
+            errors = _headless_run(app, keys)
+            print("Fertig." if not errors else f"Fertig mit {errors} Fehler-Werkzeug(en).")
+            return 1 if errors else 0
+
+        import time
+        first_tab = next((t for t in app.tabs if t.key == keys[0]), app.tabs[0])
+        print(f"Watch-Modus: prüfe alle {watch_interval} s auf neue Dateien "
+              f"({first_tab.title}). Beenden mit Strg+C.")
+        seen = {}
+        pending = None
+        while True:
+            try:
+                files = first_tab.source.collect()
+            except ValueError:
+                files = []
+            snapshot = {}
+            for path in files:
+                stat = path.stat()
+                snapshot[str(path)] = (stat.st_size, int(stat.st_mtime))
+            changed = {k: v for k, v in snapshot.items() if seen.get(k) != v}
+            if changed and changed == pending:      # zwei Polls stabil -> loslegen
+                print(f"{datetime.now():%H:%M:%S} {len(changed)} neue/geänderte Datei(en) "
+                      "- Kette startet.")
+                _headless_run(app, keys)
+                seen = snapshot
+                pending = None
+            elif changed:
+                pending = changed
+            else:
+                pending = None
+            time.sleep(watch_interval)
+    except KeyboardInterrupt:
+        print("\nWatch-Modus beendet.")
+        return 0
+    finally:
+        root.destroy()
+
+
 def main(argv=None):
-    argv = argv or []
+    argv = list(argv or [])
     if "--self-test" in argv:
         from .selftest import run_self_test
         run_self_test()
         return
+    preset = None
+    if "--preset" in argv:
+        index = argv.index("--preset")
+        if index + 1 < len(argv):
+            preset = argv[index + 1]
+    if preset and ("--run" in argv or "--watch" in argv):
+        watch_interval = None
+        if "--watch" in argv:
+            index = argv.index("--watch")
+            watch_interval = 30
+            if index + 1 < len(argv) and argv[index + 1].isdigit():
+                watch_interval = max(5, int(argv[index + 1]))
+        sys.exit(run_headless(preset, watch_interval))
     _enable_windows_dpi()
     root = tk.Tk()
     root.geometry("1280x780")

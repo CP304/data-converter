@@ -233,6 +233,56 @@ def bundle_archive(files, target_path, base_dir=None, flatten=False, log=print,
     return target_path
 
 
+def split_zip_bundles(files, target_dir, name, limit_mb, log=print,
+                      stopped=lambda: False, progress=None):
+    """Dateien auf mehrere unabhängige ZIPs mit Maximalgröße verteilen.
+
+    Jedes Teil ist allein entpackbar (kein Multi-Volume-Archiv) - gedacht
+    für E-Mail-Anhang-Limits. Die Grenze bezieht sich auf die Rohgröße der
+    Eingaben; komprimiert sind die Teile eher kleiner.
+    """
+    limit = max(1, int(limit_mb)) * 1024 * 1024
+    bundles = []
+    current, current_size = [], 0
+    for path in files:
+        size = path.stat().st_size
+        if size > limit:
+            log(f"HINWEIS: {path.name} ({format_size(size)}) ist größer als das Limit "
+                f"und bekommt ein eigenes Teil.")
+        if current and current_size + size > limit:
+            bundles.append(current)
+            current, current_size = [], 0
+        current.append(path)
+        current_size += size
+    if current:
+        bundles.append(current)
+
+    written = []
+    total = len(files)
+    done = 0
+    for index, bundle in enumerate(bundles, start=1):
+        if stopped():
+            break
+        target = unique_path(Path(target_dir) / f"{name}_teil{index:02d}.zip")
+        names_used = set()
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in bundle:
+                arcname = path.name
+                counter = 2
+                while arcname in names_used:
+                    arcname = f"{path.stem}_{counter}{path.suffix}"
+                    counter += 1
+                names_used.add(arcname)
+                archive.write(path, arcname=arcname)
+                done += 1
+                if progress:
+                    progress(done, total)
+        written.append(target)
+        log(f"TEIL {index}/{len(bundles)}: {target.name} "
+            f"({len(bundle)} Datei(en), {format_size(target.stat().st_size)})")
+    return written
+
+
 def _is_within(base, target):
     try:
         target.resolve().relative_to(base.resolve())

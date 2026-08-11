@@ -14,6 +14,20 @@ python data_converter_gui.py
 Oder unter Windows per Doppelklick: `start_data_converter.bat`
 (prüft `.venv`, `python` und `py`).
 
+Ohne Fenster (z. B. für den Windows-Taskplaner):
+
+```powershell
+python data_converter_gui.py --preset wochenlauf.json --run
+```
+
+```powershell
+python data_converter_gui.py --preset eingang.json --watch 30
+```
+
+`--run` führt das Preset (bzw. dessen gespeicherte Werkzeug-Kette) einmal aus;
+`--watch N` beobachtet die Quelle alle N Sekunden und startet automatisch,
+sobald neue Dateien vollständig angekommen sind.
+
 ## Bedienlogik
 
 Jedes Werkzeug ist ein Tab und folgt demselben Fluss:
@@ -30,7 +44,12 @@ Jedes Werkzeug ist ein Tab und folgt demselben Fluss:
 
 Bestehende Dateien werden nie überschrieben (automatisch `_2`, `_3`, …).
 Wiederkehrende Aufgaben lassen sich über *Datei → Preset speichern/laden* als
-JSON ablegen.
+JSON ablegen; die zuletzt verwendeten Presets hängen als „Presets ▾" in der
+Kopfzeile. Alle Einstellungen der Sitzung werden beim Schließen gemerkt.
+
+Extras: Rechtsklick auf eine Vorschauzeile (öffnen, im Explorer zeigen, Zeile
+aus dem Plan nehmen); *Datei → Kette ausführen…* führt mehrere Werkzeuge
+nacheinander aus (z. B. Entpacken → Ordnen → Tabellen → Inventar).
 
 ## Die Werkzeuge
 
@@ -53,7 +72,8 @@ für STEP (Part-21-Parser, Flächen-Evaluatoren für Ebene/Zylinder/Kegel/Kugel/
 Torus/NURBS/Extrusion/Rotation, Trimmung im UV-Raum, Ear-Clipping mit
 Verfeinerung — alles Standardbibliothek).
 
-- **Lesen:** STL (ASCII/binär), OBJ, PLY (ASCII/binär), 3MF, **STEP** (AP203/214/242)
+- **Lesen:** STL (ASCII/binär), OBJ, PLY (ASCII/binär), 3MF, **STEP** (AP203/214/242),
+  **IGES** (NURBS-/Rotations-/Extrusionsflächen, getrimmte Flächen)
 - **Schreiben:** STL, OBJ, PLY, 3MF, GLB und eine **eigenständige HTML-3D-Ansicht**
   (eigener WebGL-Viewer, läuft offline in jedem Browser — ideal zum Weiterleiten
   an Kollegen ohne CAD-Lizenz)
@@ -73,14 +93,16 @@ Baugruppen-Transformationen werden nicht angewendet.
 ### PDF
 Eigener PDF-Parser/-Writer (COS-Objektmodell, auch komprimierte
 Objekt-Streams): mehrere PDFs **mergen**, **splitten** (jede Seite einzeln
-oder Seitenbereich als Auszug), **Zonen abdecken** (weiß/schwarz, in % der
+oder Seitenbereich als Auszug), **Seiten drehen** (90/180/270), **umsortieren**
+(`3,1-2`), **Zonen abdecken** (weiß/schwarz, in % der
 Seite — z. B. Preisblock vor dem Weiterleiten an den Kunden). Hinweis:
 Abdecken ist visuell, der Text darunter bleibt extrahierbar; verschlüsselte
 PDFs werden abgelehnt.
 
 ### Bilder
 Eigener PNG- und BMP-Codec (zlib + struct): PNG ↔ BMP konvertieren,
-proportional **skalieren** (bilinear), **Wasserzeichen-Text** einblenden
+**zuschneiden** (Zone in %), proportional **skalieren** (bilinear),
+**Wasserzeichen-Text** einblenden
 (eigener Pixelfont, z. B. „ENTWURF" oder „GEPRÜFT 2026"), **DPI setzen**
 für Druck/ERP-Vorgaben. JPEG/TIFF brauchen echte Codecs und bleiben außen vor.
 
@@ -90,9 +112,10 @@ Groß-/Kleinschreibung, Änderungsdatum voranstellen. Vorher/Nachher in der
 Vorschau, Journal-Datei je Lauf und **Rückgängig**-Button.
 
 ### Packen
-Jede Datei einzeln zippen, alles als ZIP-/TAR.GZ-Lieferantenpaket bündeln oder
-Archive entpacken (ZIP, TAR, TGZ, GZ, BZ2, XZ) — mit Schutz gegen unsichere
-Pfade und optionalem Glätten der Ordnerstruktur.
+Jede Datei einzeln zippen, alles als ZIP-/TAR.GZ-Lieferantenpaket bündeln,
+Dateien auf **mehrere unabhängige ZIPs mit Maximalgröße** verteilen
+(E-Mail-Anhang-Limits) oder Archive entpacken (ZIP, TAR, TGZ, GZ, BZ2, XZ) —
+mit Schutz gegen unsichere Pfade und optionalem Glätten der Ordnerstruktur.
 
 ### Ordnen
 Downloads und Lieferantenordner aufräumen: nach Dateityp oder Datum (JJJJ-MM)
@@ -145,6 +168,7 @@ Beispieldaten für manuelle Tests liegen unter `mock_files/`.
 - `converter_app/xlsx_io.py` — XLSX-Reader/-Writer (zipfile + ElementTree)
 - `converter_app/cad_io.py` — STL/OBJ/PLY/3MF/GLB lesen & schreiben, HTML-3D-Viewer, STEP/IGES-Bericht, DXF→SVG
 - `converter_app/step_mesh.py` — STEP-B-Rep-Tessellierungs-Kern
+- `converter_app/iges_mesh.py` — IGES-Erweiterung des Tessellierungs-Kerns
 - `converter_app/pdf_io.py` — PDF-Parser/-Writer: mergen, splitten, Zonen abdecken
 - `converter_app/img_io.py` — PNG/BMP-Codec: skalieren, Wasserzeichen, DPI
 - `converter_app/filetools.py` — Umbenennen, Archive, Ordnen, Inventar, EML, Encoding
