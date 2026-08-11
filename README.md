@@ -59,6 +59,8 @@ Verfeinerung — alles Standardbibliothek).
   an Kollegen ohne CAD-Lizenz)
 - **STEP/IGES-Prüfbericht:** Schema, Produkte, Einheiten, Autor, Entitäten-Statistik,
   Geometrieart — als CSV/HTML für die Wareneingangsprüfung von CAD-Daten
+- **DXF → SVG:** 2D-Zeichnungen (LINE, CIRCLE, ARC, Polylinien, TEXT) als
+  skalierbare Browser-Ansicht
 - Qualitätsstufen grob/mittel/fein für die STEP-Tessellierung
 
 Grenzen (ehrlich): Native Formate wie SLDPRT/IPT/eDrawings enthalten
@@ -67,6 +69,20 @@ ohne Hersteller-Kernel niemand lesen. Praxis-Tipp: beim Lieferanten STEP oder
 STL anfordern; eDrawings selbst kann Teile als STL speichern. STEP-Tessellierung
 liefert ein Sichtmodell/Fertigungs-Mesh, kein exaktes B-Rep;
 Baugruppen-Transformationen werden nicht angewendet.
+
+### PDF
+Eigener PDF-Parser/-Writer (COS-Objektmodell, auch komprimierte
+Objekt-Streams): mehrere PDFs **mergen**, **splitten** (jede Seite einzeln
+oder Seitenbereich als Auszug), **Zonen abdecken** (weiß/schwarz, in % der
+Seite — z. B. Preisblock vor dem Weiterleiten an den Kunden). Hinweis:
+Abdecken ist visuell, der Text darunter bleibt extrahierbar; verschlüsselte
+PDFs werden abgelehnt.
+
+### Bilder
+Eigener PNG- und BMP-Codec (zlib + struct): PNG ↔ BMP konvertieren,
+proportional **skalieren** (bilinear), **Wasserzeichen-Text** einblenden
+(eigener Pixelfont, z. B. „ENTWURF" oder „GEPRÜFT 2026"), **DPI setzen**
+für Druck/ERP-Vorgaben. JPEG/TIFF brauchen echte Codecs und bleiben außen vor.
 
 ### Umbenennen
 Suchen/Ersetzen (optional Regex), Präfix/Suffix, Nummerierung,
@@ -103,8 +119,11 @@ ERP-Importe vereinheitlichen. Quell-Encoding wird automatisch erkannt.
 
 Diese Version verspricht nur, was sie ohne Installationen hält. Nicht enthalten
 sind deshalb: native CAD-Formate (SLDPRT/IPT/eDrawings — proprietäre
-Kernel-Daten), DWG/DXF-Geometrie, Office→PDF, Bildbearbeitung,
+Kernel-Daten), DWG (binär-proprietär), Office→PDF, JPEG/TIFF/RAW,
 RAR/7z-Entpacken, Medien-Konvertierung.
+
+Wohin die Reise darüber hinaus geht (Preislisten-Diff, Angebotsvergleich,
+BOM-Abgleich, Automatisierung, Lauf-Historie): siehe [ROADMAP.md](ROADMAP.md).
 
 ## Tests
 
@@ -124,7 +143,9 @@ Beispieldaten für manuelle Tests liegen unter `mock_files/`.
 - `converter_app/gui.py` — Oberfläche (tkinter/ttk)
 - `converter_app/tabular.py` — Tabellen lesen/aufbereiten/schreiben
 - `converter_app/xlsx_io.py` — XLSX-Reader/-Writer (zipfile + ElementTree)
-- `converter_app/cad_io.py` — STL/OBJ/PLY/3MF/GLB lesen & schreiben, HTML-3D-Viewer, STEP/IGES-Bericht
+- `converter_app/cad_io.py` — STL/OBJ/PLY/3MF/GLB lesen & schreiben, HTML-3D-Viewer, STEP/IGES-Bericht, DXF→SVG
 - `converter_app/step_mesh.py` — STEP-B-Rep-Tessellierungs-Kern
+- `converter_app/pdf_io.py` — PDF-Parser/-Writer: mergen, splitten, Zonen abdecken
+- `converter_app/img_io.py` — PNG/BMP-Codec: skalieren, Wasserzeichen, DPI
 - `converter_app/filetools.py` — Umbenennen, Archive, Ordnen, Inventar, EML, Encoding
 - `converter_app/selftest.py` — Kurz-Selbsttest ohne GUI

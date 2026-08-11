@@ -636,3 +636,159 @@ def brep_info(path):
     if ext in (".iges", ".igs"):
         return iges_info(path)
     raise ValueError(f"Kein STEP/IGES: {ext}")
+
+
+# ---------------------------------------------------------------------------
+# DXF -> SVG (2D-Zeichnungen sichtbar machen)
+# ---------------------------------------------------------------------------
+
+def _dxf_pairs(text):
+    lines = text.splitlines()
+    for i in range(0, len(lines) - 1, 2):
+        try:
+            yield int(lines[i].strip()), lines[i + 1].strip()
+        except ValueError:
+            continue
+
+
+def dxf_to_svg(path, target_path):
+    """ASCII-DXF (LINE, CIRCLE, ARC, LWPOLYLINE, POLYLINE, TEXT) als SVG.
+
+    Liefert die Anzahl gezeichneter Elemente. Y-Achse wird für SVG gespiegelt.
+    """
+    text = Path(path).read_text(encoding="latin-1", errors="replace")
+    entities = []
+    section = None
+    current = None
+
+    def flush():
+        if current and current.get("typ"):
+            entities.append(current)
+
+    for code, value in _dxf_pairs(text):
+        if code == 2 and section == "pending":
+            section = value.upper()
+            continue
+        if code == 0:
+            if value.upper() == "SECTION":
+                section = "pending"
+                continue
+            if value.upper() == "ENDSEC":
+                flush()
+                current = None
+                section = None
+                continue
+            if section == "ENTITIES":
+                flush()
+                current = {"typ": value.upper()}
+                continue
+        if current is not None and section == "ENTITIES":
+            current.setdefault(code, []).append(value)
+    flush()
+
+    def fget(entity, code, index=0, default=0.0):
+        try:
+            return float(entity[code][index])
+        except (KeyError, IndexError, ValueError):
+            return default
+
+    shapes = []
+    points_bounds = []
+
+    def note(x, y):
+        points_bounds.append((x, y))
+
+    import math as _math
+    for entity in entities:
+        typ = entity.get("typ")
+        if typ == "LINE":
+            x1, y1 = fget(entity, 10), fget(entity, 20)
+            x2, y2 = fget(entity, 11), fget(entity, 21)
+            shapes.append(("line", (x1, y1, x2, y2)))
+            note(x1, y1); note(x2, y2)
+        elif typ == "CIRCLE":
+            cx, cy, r = fget(entity, 10), fget(entity, 20), fget(entity, 40)
+            shapes.append(("circle", (cx, cy, r)))
+            note(cx - r, cy - r); note(cx + r, cy + r)
+        elif typ == "ARC":
+            cx, cy, r = fget(entity, 10), fget(entity, 20), fget(entity, 40)
+            a0 = _math.radians(fget(entity, 50))
+            a1 = _math.radians(fget(entity, 51))
+            if a1 <= a0:
+                a1 += 2 * _math.pi
+            shapes.append(("arc", (cx, cy, r, a0, a1)))
+            note(cx - r, cy - r); note(cx + r, cy + r)
+        elif typ in ("LWPOLYLINE", "POLYLINE"):
+            xs = entity.get(10, [])
+            ys = entity.get(20, [])
+            pts = [(float(x), float(y)) for x, y in zip(xs, ys)]
+            if len(pts) >= 2:
+                closed = False
+                try:
+                    closed = int(float(entity.get(70, ["0"])[0])) & 1 == 1
+                except ValueError:
+                    pass
+                shapes.append(("poly", (pts, closed)))
+                for p in pts:
+                    note(*p)
+        elif typ == "VERTEX":
+            if shapes and shapes[-1][0] == "poly":
+                pts, closed = shapes[-1][1]
+                pts.append((fget(entity, 10), fget(entity, 20)))
+                note(*pts[-1])
+        elif typ in ("TEXT", "MTEXT"):
+            x, y = fget(entity, 10), fget(entity, 20)
+            h = fget(entity, 40, default=2.5) or 2.5
+            content = (entity.get(1, [""])[0]).replace("\\P", " ")
+            content = re.sub(r"\[A-Za-z][^;]*;", "", content).replace("{", "").replace("}", "")
+            if content:
+                shapes.append(("text", (x, y, h, content)))
+                note(x, y); note(x + h * 0.7 * len(content), y + h)
+
+    if not shapes:
+        raise ValueError("Keine darstellbaren 2D-Elemente in der DXF-Datei gefunden.")
+
+    min_x = min(p[0] for p in points_bounds)
+    max_x = max(p[0] for p in points_bounds)
+    min_y = min(p[1] for p in points_bounds)
+    max_y = max(p[1] for p in points_bounds)
+    width = max(max_x - min_x, 1e-6)
+    height = max(max_y - min_y, 1e-6)
+    margin = 0.03 * max(width, height)
+    stroke = max(width, height) / 400
+
+    def ty(y):                                        # DXF-Y nach SVG-Y spiegeln
+        return (max_y + min_y) - y
+
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" '
+             f'viewBox="{min_x - margin:.3f} {min_y - margin:.3f} '
+             f'{width + 2 * margin:.3f} {height + 2 * margin:.3f}">',
+             f'<g fill="none" stroke="#1c2430" stroke-width="{stroke:.4f}" '
+             f'stroke-linecap="round" stroke-linejoin="round">']
+    for kind, payload in shapes:
+        if kind == "line":
+            x1, y1, x2, y2 = payload
+            parts.append(f'<line x1="{x1:.3f}" y1="{ty(y1):.3f}" x2="{x2:.3f}" y2="{ty(y2):.3f}"/>')
+        elif kind == "circle":
+            cx, cy, r = payload
+            parts.append(f'<circle cx="{cx:.3f}" cy="{ty(cy):.3f}" r="{r:.3f}"/>')
+        elif kind == "arc":
+            cx, cy, r, a0, a1 = payload
+            x1 = cx + r * _math.cos(a0); y1 = cy + r * _math.sin(a0)
+            x2 = cx + r * _math.cos(a1); y2 = cy + r * _math.sin(a1)
+            large = 1 if (a1 - a0) > _math.pi else 0
+            parts.append(f'<path d="M {x1:.3f} {ty(y1):.3f} '
+                         f'A {r:.3f} {r:.3f} 0 {large} 0 {x2:.3f} {ty(y2):.3f}"/>')
+        elif kind == "poly":
+            pts, closed = payload
+            coords = " ".join(f"{x:.3f},{ty(y):.3f}" for x, y in pts)
+            tag = "polygon" if closed else "polyline"
+            parts.append(f'<{tag} points="{coords}"/>')
+        elif kind == "text":
+            x, y, h, content = payload
+            parts.append(f'<text x="{x:.3f}" y="{ty(y):.3f}" font-size="{h:.3f}" '
+                         f'fill="#1c2430" stroke="none" '
+                         f'font-family="Segoe UI, sans-serif">{escape(content)}</text>')
+    parts.append("</g></svg>")
+    Path(target_path).write_text("\n".join(parts), encoding="utf-8")
+    return len(shapes)

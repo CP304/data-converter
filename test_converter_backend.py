@@ -4,7 +4,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from converter_app import cad_io, filetools, step_mesh, tabular, xlsx_io
+from converter_app import cad_io, filetools, img_io, pdf_io, step_mesh, tabular, xlsx_io
 
 
 def test_xlsx_roundtrip(root):
@@ -307,6 +307,77 @@ def test_eml_conversion(root):
     filetools.eml_to_text(eml, root / "angebot.txt")
     text = (root / "angebot.txt").read_text(encoding="utf-8")
     assert "Betreff: Angebot 4711" in text and "12,40" in text and "angebot.pdf" in text
+
+
+_MINI_PDF = (b"%PDF-1.4\n"
+             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 595 842] >>\nendobj\n"
+             b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n"
+             b"4 0 obj\n<< /Length 46 >>\nstream\n"
+             b"BT /F1 24 Tf 72 770 Td (Angebot 4711) Tj ET\n"
+             b"endstream\nendobj\n"
+             b"5 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>\nendobj\n"
+             b"6 0 obj\n<< /Length 44 >>\nstream\n"
+             b"BT /F1 24 Tf 72 770 Td (Seite ZWEI) Tj ET\n"
+             b"endstream\nendobj\n"
+             b"trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n")
+
+
+def test_pdf_tools(root):
+    src = root / "quelle.pdf"
+    src.write_bytes(_MINI_PDF)
+    assert pdf_io.pdf_page_count(src) == 2
+
+    merged = root / "merged.pdf"
+    assert pdf_io.merge_pdfs([src, src], merged) == 4
+    assert pdf_io.pdf_page_count(merged) == 4
+
+    files = pdf_io.split_pdf(merged, root, ranges_text="2-3", single_pages=True)
+    assert len(files) == 2 and all(pdf_io.pdf_page_count(f) == 1 for f in files)
+    auszug = pdf_io.split_pdf(merged, root, ranges_text="1,4", single_pages=False)
+    assert pdf_io.pdf_page_count(auszug[0]) == 2
+
+    red = root / "abgedeckt.pdf"
+    covered = pdf_io.redact_pdf(src, red, zone=(10, 5, 50, 10), color="schwarz", ranges_text="1")
+    assert covered == 1 and pdf_io.pdf_page_count(red) == 2
+    assert b"0 0 0 rg" in red.read_bytes()
+
+
+def test_image_tools(root):
+    image = img_io.Image(64, 40, "RGB", bytearray([220, 80, 40] * (64 * 40)), dpi=300)
+    img_io.write_png(image, root / "probe.png")
+    back = img_io.read_png(root / "probe.png")
+    assert (back.width, back.height, back.mode, back.dpi) == (64, 40, "RGB", 300)
+    assert bytes(back.data[:3]) == bytes([220, 80, 40])
+
+    small = img_io.resize(back, 32)
+    assert (small.width, small.height) == (32, 20)      # proportional: 40*32/64
+    before = bytes(small.data)
+    img_io.watermark(small, "GEPRÜFT 2026")
+    assert bytes(small.data) != before
+
+    img_io.write_bmp(small, root / "probe.bmp")
+    bmp = img_io.read_bmp(root / "probe.bmp")
+    assert (bmp.width, bmp.height, bmp.mode) == (32, 20, "RGB")
+    img_io.write_png(bmp, root / "rueck.png")
+    assert img_io.read_png(root / "rueck.png").width == 32
+
+
+def test_dxf_to_svg(root):
+    dxf_lines = ["0", "SECTION", "2", "ENTITIES",
+                 "0", "LINE", "10", "0", "20", "0", "11", "100", "21", "0",
+                 "0", "CIRCLE", "10", "50", "20", "30", "40", "10",
+                 "0", "ARC", "10", "0", "20", "0", "40", "20", "50", "0", "51", "90",
+                 "0", "LWPOLYLINE", "70", "1", "10", "0", "20", "50",
+                 "10", "20", "20", "70", "10", "40", "20", "50",
+                 "0", "TEXT", "10", "5", "20", "60", "40", "5", "1", "Bauteil A-100",
+                 "0", "ENDSEC", "0", "EOF"]
+    (root / "zeichnung.dxf").write_text("\n".join(dxf_lines) + "\n", encoding="ascii")
+    count = cad_io.dxf_to_svg(root / "zeichnung.dxf", root / "zeichnung.svg")
+    svg = (root / "zeichnung.svg").read_text(encoding="utf-8")
+    assert count == 5
+    assert "<line" in svg and "<circle" in svg and "<path" in svg
+    assert "polygon" in svg and "A-100" in svg
 
 
 def main():

@@ -20,7 +20,7 @@ from tkinter import ttk, filedialog, messagebox
 import os
 import subprocess
 
-from . import APP_TITLE, __version__, cad_io, filetools, tabular
+from . import APP_TITLE, __version__, cad_io, filetools, img_io, pdf_io, tabular
 
 # Farbwelt
 BG = "#eef1f6"
@@ -575,6 +575,9 @@ class CadTab(ToolTab):
         ttk.Radiobutton(row1, text="STEP/IGES-Prüfbericht", value="bericht",
                         variable=self.mode_var, style="Card.TRadiobutton",
                         command=self._mode_changed).pack(side="left")
+        ttk.Radiobutton(row1, text="DXF-Zeichnung → SVG", value="dxf",
+                        variable=self.mode_var, style="Card.TRadiobutton",
+                        command=self._mode_changed).pack(side="left", padx=(16, 0))
 
         row2 = ttk.Frame(parent, style="Card.TFrame")
         row2.pack(fill="x", pady=(8, 0))
@@ -607,14 +610,19 @@ class CadTab(ToolTab):
                   style="CardSub.TLabel").pack(side="left", padx=(18, 0))
 
     def _mode_changed(self):
-        self.source.ext_var.set("stl, obj, ply, 3mf, step, stp" if self.mode_var.get() == "konvertieren"
-                                else "step, stp, iges, igs")
+        exts = {"konvertieren": "stl, obj, ply, 3mf, step, stp",
+                "bericht": "step, stp, iges, igs", "dxf": "dxf"}
+        self.source.ext_var.set(exts[self.mode_var.get()])
 
     def make_plan(self):
         mode = self.mode_var.get()
         files = self.source.collect()
         target_dir = self.target.resolve(self.source.base_dir())
         self.log_dir = target_dir
+        if mode == "dxf":
+            self.run_cfg = {"mode": mode, "files": files, "target_dir": target_dir}
+            return [PlanItem(path.name, filetools.format_size(path.stat().st_size),
+                             str(target_dir / (path.stem + ".svg")), payload=path) for path in files]
         if mode == "konvertieren":
             formats = [ext for ext, var in self.format_vars.items() if var.get()]
             if not formats:
@@ -640,6 +648,22 @@ class CadTab(ToolTab):
     def execute(self, ctx):
         cfg = self.run_cfg
         cfg["target_dir"].mkdir(parents=True, exist_ok=True)
+        if cfg["mode"] == "dxf":
+            for idx, item in enumerate(self.plan):
+                if ctx.stopped():
+                    ctx.log("Gestoppt.")
+                    return
+                path = item.payload
+                try:
+                    target = filetools.unique_path(cfg["target_dir"] / (path.stem + ".svg"))
+                    count = cad_io.dxf_to_svg(path, target)
+                    ctx.item(idx, "OK")
+                    ctx.log(f"OK: {path.name} → {target.name} ({count} Elemente)", "ok")
+                except Exception as exc:
+                    ctx.item(idx, "FEHLER")
+                    ctx.log(f"FEHLER: {path.name}: {exc}", "err")
+                ctx.progress(idx + 1, len(self.plan))
+            return
         if cfg["mode"] == "konvertieren":
             cache = {}
             for idx, item in enumerate(self.plan):
@@ -706,6 +730,229 @@ class CadTab(ToolTab):
         self.report_csv_var.set(state.get("report_csv", True))
         self.report_html_var.set(state.get("report_html", True))
         self.report_name_var.set(state.get("report_name", "cad_bericht"))
+
+
+# ---------------------------------------------------------------------------
+# Tab: PDF
+# ---------------------------------------------------------------------------
+
+PDF_MODES = {"mergen": "Alle zu einer PDF zusammenführen",
+             "splitten": "Splitten (jede Seite einzeln)",
+             "auszug": "Auszug (Seitenbereich als eine PDF)",
+             "abdecken": "Zone abdecken (weiß/schwarz)"}
+
+
+class PdfTab(ToolTab):
+    key = "pdf"
+    title = "PDF"
+    hint = "Mergen · Splitten · Zonen abdecken – eigener PDF-Parser, keine Zusatzsoftware"
+    default_exts = "pdf"
+    target_subfolder = "_pdf"
+
+    def build_options(self, parent):
+        row1 = ttk.Frame(parent, style="Card.TFrame")
+        row1.pack(fill="x")
+        self.mode_var = tk.StringVar(value="mergen")
+        for value, label in PDF_MODES.items():
+            ttk.Radiobutton(row1, text=label, value=value, variable=self.mode_var,
+                            style="Card.TRadiobutton").pack(side="left", padx=(0, 12))
+
+        row2 = ttk.Frame(parent, style="Card.TFrame")
+        row2.pack(fill="x", pady=(8, 0))
+        ttk.Label(row2, text="Name (mergen)", style="CardSub.TLabel").pack(side="left")
+        self.bundle_var = tk.StringVar(value="zusammengefuehrt")
+        ttk.Entry(row2, textvariable=self.bundle_var, width=20).pack(side="left", padx=(6, 14))
+        ttk.Label(row2, text="Seiten (z. B. 1-3,7; leer = alle)", style="CardSub.TLabel").pack(side="left")
+        self.range_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.range_var, width=14).pack(side="left", padx=(6, 14))
+        ttk.Label(row2, text="Zone % (x, y, Breite, Höhe von links oben)", style="CardSub.TLabel").pack(side="left")
+        self.zone_vars = [tk.StringVar(value=v) for v in ("5", "5", "40", "10")]
+        for var in self.zone_vars:
+            ttk.Entry(row2, textvariable=var, width=5).pack(side="left", padx=(4, 0))
+        self.color_var = tk.StringVar(value="weiss")
+        ttk.Radiobutton(row2, text="weiß", value="weiss", variable=self.color_var,
+                        style="Card.TRadiobutton").pack(side="left", padx=(12, 4))
+        ttk.Radiobutton(row2, text="schwarz", value="schwarz", variable=self.color_var,
+                        style="Card.TRadiobutton").pack(side="left")
+
+        row3 = ttk.Frame(parent, style="Card.TFrame")
+        row3.pack(fill="x", pady=(6, 0))
+        ttk.Label(row3, text="Hinweis: „Abdecken“ legt eine Fläche über den Inhalt – der Text darunter "
+                            "bleibt in der Datei extrahierbar (keine echte Schwärzung). Verschlüsselte "
+                            "PDFs werden abgelehnt.", style="CardSub.TLabel").pack(side="left")
+
+    def make_plan(self):
+        mode = self.mode_var.get()
+        files = self.source.collect()
+        target_dir = self.target.resolve(self.source.base_dir())
+        self.log_dir = target_dir
+        zone = []
+        for var in self.zone_vars:
+            try:
+                zone.append(float(var.get().replace(",", ".")))
+            except ValueError:
+                raise ValueError(f"Zone: „{var.get()}“ ist keine Zahl.")
+        self.run_cfg = {"mode": mode, "files": files, "target_dir": target_dir,
+                        "bundle": filetools.safe_filename(self.bundle_var.get().strip() or "zusammengefuehrt"),
+                        "ranges": self.range_var.get().strip(), "zone": zone,
+                        "color": self.color_var.get()}
+        if mode == "mergen":
+            if len(files) < 2:
+                raise ValueError("Zum Mergen mindestens zwei PDFs wählen.")
+            total = sum(p.stat().st_size for p in files)
+            return [PlanItem(f"{len(files)} PDFs", filetools.format_size(total),
+                             str(target_dir / (self.run_cfg["bundle"] + ".pdf")))]
+        labels = {"splitten": "jede Seite einzeln", "auszug": f"Auszug {self.run_cfg['ranges'] or 'alle'}",
+                  "abdecken": f"Zone abdecken ({self.run_cfg['color']})"}
+        return [PlanItem(path.name, filetools.format_size(path.stat().st_size),
+                         labels[mode], payload=path) for path in files]
+
+    def execute(self, ctx):
+        cfg = self.run_cfg
+        cfg["target_dir"].mkdir(parents=True, exist_ok=True)
+        if cfg["mode"] == "mergen":
+            target = filetools.unique_path(cfg["target_dir"] / (cfg["bundle"] + ".pdf"))
+            pages = pdf_io.merge_pdfs(cfg["files"], target)
+            ctx.item(0, "OK")
+            ctx.log(f"MERGE: {target.name} ({pages} Seiten aus {len(cfg['files'])} Dateien)", "ok")
+            ctx.progress(1, 1)
+            return
+        for idx, item in enumerate(self.plan):
+            if ctx.stopped():
+                ctx.log("Gestoppt.")
+                return
+            path = item.payload
+            try:
+                if cfg["mode"] == "splitten":
+                    written = pdf_io.split_pdf(path, cfg["target_dir"], cfg["ranges"],
+                                               single_pages=True, log=ctx.log)
+                    ctx.item(idx, f"OK ({len(written)})")
+                elif cfg["mode"] == "auszug":
+                    written = pdf_io.split_pdf(path, cfg["target_dir"], cfg["ranges"],
+                                               single_pages=False, log=ctx.log)
+                    ctx.item(idx, "OK")
+                else:
+                    target = filetools.unique_path(cfg["target_dir"] / (path.stem + "_abgedeckt.pdf"))
+                    covered = pdf_io.redact_pdf(path, target, cfg["zone"], cfg["color"],
+                                                cfg["ranges"], log=ctx.log)
+                    ctx.item(idx, f"OK ({covered})")
+                    ctx.log(f"OK: {target.name} ({covered} Seite(n) abgedeckt)", "ok")
+            except Exception as exc:
+                ctx.item(idx, "FEHLER")
+                ctx.log(f"FEHLER: {path.name}: {exc}", "err")
+            ctx.progress(idx + 1, len(self.plan))
+
+    def option_state(self):
+        return {"mode": self.mode_var.get(), "bundle": self.bundle_var.get(),
+                "ranges": self.range_var.get(), "zone": [v.get() for v in self.zone_vars],
+                "color": self.color_var.get()}
+
+    def apply_option_state(self, state):
+        self.mode_var.set(state.get("mode", "mergen"))
+        self.bundle_var.set(state.get("bundle", "zusammengefuehrt"))
+        self.range_var.set(state.get("ranges", ""))
+        for var, value in zip(self.zone_vars, state.get("zone", ["5", "5", "40", "10"])):
+            var.set(value)
+        self.color_var.set(state.get("color", "weiss"))
+
+
+# ---------------------------------------------------------------------------
+# Tab: Bilder
+# ---------------------------------------------------------------------------
+
+class BilderTab(ToolTab):
+    key = "bilder"
+    title = "Bilder"
+    hint = "PNG ↔ BMP – skalieren, Wasserzeichen, DPI (eigener Codec; JPEG braucht echte Codecs)"
+    default_exts = "png, bmp"
+    target_subfolder = "_bilder"
+
+    def build_options(self, parent):
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Label(row, text="Zielformate", style="CardSub.TLabel").pack(side="left")
+        self.png_var = tk.BooleanVar(value=True)
+        self.bmp_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="PNG", variable=self.png_var, style="Card.TCheckbutton").pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(row, text="BMP", variable=self.bmp_var, style="Card.TCheckbutton").pack(side="left", padx=(8, 14))
+        ttk.Label(row, text="max. Breite px (leer = original)", style="CardSub.TLabel").pack(side="left")
+        self.width_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.width_var, width=7).pack(side="left", padx=(6, 14))
+        ttk.Label(row, text="DPI setzen (leer = beibehalten)", style="CardSub.TLabel").pack(side="left")
+        self.dpi_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.dpi_var, width=6).pack(side="left", padx=(6, 14))
+        ttk.Label(row, text="Wasserzeichen-Text", style="CardSub.TLabel").pack(side="left")
+        self.mark_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.mark_var, width=18).pack(side="left", padx=(6, 0))
+
+    def make_plan(self):
+        files = self.source.collect()
+        formats = [ext for ext, var in ((".png", self.png_var), (".bmp", self.bmp_var)) if var.get()]
+        if not formats:
+            raise ValueError("Bitte mindestens ein Zielformat anhaken (PNG oder BMP).")
+        width = dpi = None
+        if self.width_var.get().strip():
+            try:
+                width = max(1, int(self.width_var.get()))
+            except ValueError:
+                raise ValueError("Max. Breite muss eine ganze Zahl sein.")
+        if self.dpi_var.get().strip():
+            try:
+                dpi = max(1, int(self.dpi_var.get()))
+            except ValueError:
+                raise ValueError("DPI muss eine ganze Zahl sein.")
+        target_dir = self.target.resolve(self.source.base_dir())
+        self.log_dir = target_dir
+        self.run_cfg = {"files": files, "formats": formats, "target_dir": target_dir,
+                        "width": width, "dpi": dpi, "mark": self.mark_var.get().strip()}
+        plan = []
+        for path in files:
+            size = filetools.format_size(path.stat().st_size)
+            for ext in formats:
+                plan.append(PlanItem(path.name, size, str(target_dir / (path.stem + ext)),
+                                     payload=(path, ext)))
+        return plan
+
+    def execute(self, ctx):
+        cfg = self.run_cfg
+        cfg["target_dir"].mkdir(parents=True, exist_ok=True)
+        cache = {}
+        for idx, item in enumerate(self.plan):
+            if ctx.stopped():
+                ctx.log("Gestoppt.")
+                return
+            path, ext = item.payload
+            try:
+                if path not in cache:
+                    image = img_io.read_image(path)
+                    if cfg["width"] and image.width > cfg["width"]:
+                        image = img_io.resize(image, cfg["width"])
+                    if cfg["dpi"]:
+                        image.dpi = cfg["dpi"]
+                    if cfg["mark"]:
+                        image = img_io.watermark(image, cfg["mark"])
+                    cache[path] = image
+                    ctx.log(f"GELESEN: {path.name} ({image.stats()})")
+                target = filetools.unique_path(cfg["target_dir"] / (path.stem + ext))
+                img_io.write_image(cache[path], target)
+                ctx.item(idx, "OK")
+                ctx.log(f"OK: {path.name} → {target.name}", "ok")
+            except Exception as exc:
+                ctx.item(idx, "FEHLER")
+                ctx.log(f"FEHLER: {path.name}: {exc}", "err")
+            ctx.progress(idx + 1, len(self.plan))
+
+    def option_state(self):
+        return {"png": self.png_var.get(), "bmp": self.bmp_var.get(),
+                "width": self.width_var.get(), "dpi": self.dpi_var.get(),
+                "mark": self.mark_var.get()}
+
+    def apply_option_state(self, state):
+        self.png_var.set(state.get("png", True))
+        self.bmp_var.set(state.get("bmp", False))
+        self.width_var.set(state.get("width", ""))
+        self.dpi_var.set(state.get("dpi", ""))
+        self.mark_var.set(state.get("mark", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -1300,7 +1547,8 @@ class TextTab(ToolTab):
         self.newline_combo.set(state.get("newline", NEWLINE_LABELS["keep"]))
 
 
-TAB_CLASSES = [TabellenTab, CadTab, RenameTab, PackTab, OrdnenTab, InventarTab, EmlTab, TextTab]
+TAB_CLASSES = [TabellenTab, CadTab, PdfTab, BilderTab, RenameTab, PackTab, OrdnenTab,
+               InventarTab, EmlTab, TextTab]
 
 
 # ---------------------------------------------------------------------------
@@ -1344,7 +1592,7 @@ class DataConverterApp:
                   background=[("active", ACCENT_DARK), ("disabled", "#9db9e8")],
                   foreground=[("disabled", "#f0f4fb")])
         style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 4, 0, 0))
-        style.configure("TNotebook.Tab", padding=(16, 8), font=FONT)
+        style.configure("TNotebook.Tab", padding=(11, 8), font=FONT)
         style.map("TNotebook.Tab",
                   background=[("selected", CARD), ("!selected", "#dde3ee")],
                   foreground=[("selected", ACCENT_DARK)])
@@ -1550,7 +1798,9 @@ class DataConverterApp:
             "• Tabellen: CSV/TSV/TXT/XLSX/JSON/XML lesen → CSV/TSV/XLSX/JSON/XML/HTML/MD schreiben,\n"
             "  inkl. Dezimalzeichen, Spaltenauswahl, Duplikate, Zusammenführen.\n"
             "• CAD: STL/OBJ/PLY/3MF konvertieren, STEP mit eigenem B-Rep-Kern tessellieren\n"
-            "  (→ STL/OBJ/PLY/3MF/GLB/HTML-3D-Ansicht), STEP/IGES-Prüfbericht.\n"
+            "  (→ STL/OBJ/PLY/3MF/GLB/HTML-3D-Ansicht), STEP/IGES-Prüfbericht, DXF → SVG.\n"
+            "• PDF: mergen, splitten, Seitenauszug, Zonen abdecken (eigener PDF-Parser).\n"
+            "• Bilder: PNG ↔ BMP, skalieren, Wasserzeichen, DPI setzen (eigener Codec).\n"
             "• Umbenennen: Suchen/Ersetzen, Präfix/Suffix, Nummern, Datum – mit Vorschau und Rückgängig.\n"
             "• Packen: ZIP/TAR.GZ erstellen, ZIP/TAR/GZ/BZ2/XZ entpacken.\n"
             "• Ordnen: nach Typ/Datum sortieren, Ordner glätten, leere Ordner entfernen – mit Rückgängig.\n"
@@ -1582,7 +1832,7 @@ def main(argv=None):
         return
     _enable_windows_dpi()
     root = tk.Tk()
-    root.geometry("1180x760")
-    root.minsize(980, 640)
+    root.geometry("1280x780")
+    root.minsize(1040, 640)
     DataConverterApp(root)
     root.mainloop()
