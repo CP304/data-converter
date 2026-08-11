@@ -122,8 +122,8 @@ sind deshalb: native CAD-Formate (SLDPRT/IPT/eDrawings — proprietäre
 Kernel-Daten), DWG (binär-proprietär), Office→PDF, JPEG/TIFF/RAW,
 RAR/7z-Entpacken, Medien-Konvertierung.
 
-Wohin die Reise darüber hinaus geht (Preislisten-Diff, Angebotsvergleich,
-BOM-Abgleich, Automatisierung, Lauf-Historie): siehe [ROADMAP.md](ROADMAP.md).
+Geplante Abrundungen innerhalb der Vision „praktisches Dateihandling in einem
+Tool": siehe [ROADMAP.md](ROADMAP.md).
 
 ## Tests
 
