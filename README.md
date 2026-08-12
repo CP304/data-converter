@@ -162,14 +162,17 @@ Beispieldaten für manuelle Tests liegen unter `mock_files/`.
 
 ## Projektstruktur
 
-- `data_converter_gui.py` — Einstiegspunkt
-- `converter_app/gui.py` — Oberfläche (tkinter/ttk)
-- `converter_app/tabular.py` — Tabellen lesen/aufbereiten/schreiben
-- `converter_app/xlsx_io.py` — XLSX-Reader/-Writer (zipfile + ElementTree)
-- `converter_app/cad_io.py` — STL/OBJ/PLY/3MF/GLB lesen & schreiben, HTML-3D-Viewer, STEP/IGES-Bericht, DXF→SVG
-- `converter_app/step_mesh.py` — STEP-B-Rep-Tessellierungs-Kern
-- `converter_app/iges_mesh.py` — IGES-Erweiterung des Tessellierungs-Kerns
-- `converter_app/pdf_io.py` — PDF-Parser/-Writer: mergen, splitten, Zonen abdecken
-- `converter_app/img_io.py` — PNG/BMP-Codec: skalieren, Wasserzeichen, DPI
-- `converter_app/filetools.py` — Umbenennen, Archive, Ordnen, Inventar, EML, Encoding
-- `converter_app/selftest.py` — Kurz-Selbsttest ohne GUI
+Das komplette Tool ist **eine einzige Datei**: `data_converter_gui.py` —
+zum Weitergeben einfach diese eine Datei kopieren, mehr braucht es nicht
+(Python vorausgesetzt). Intern ist sie in klar markierte Abschnitte gegliedert:
+
+- XLSX-Reader/-Writer (zipfile + ElementTree)
+- Tabellen lesen/aufbereiten/schreiben
+- Datei-Werkzeuge: Umbenennen, Archive, Ordnen, Inventar, EML, Encoding
+- CAD: Mesh-Formate, HTML-3D-Viewer, STEP/IGES-Bericht, DXF→SVG
+- STEP-B-Rep-Tessellierungs-Kern + IGES-Erweiterung
+- PDF: mergen, splitten, drehen, umsortieren, Zonen abdecken
+- Bilder: PNG/BMP-Codec, zuschneiden, skalieren, Wasserzeichen, DPI
+- Oberfläche, Ketten, Presets, Headless-CLI und Watch-Modus
+
+Dazu: `test_converter_backend.py` (Testsuite) und `mock_files/` (Beispieldaten).

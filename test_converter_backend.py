@@ -4,7 +4,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from converter_app import cad_io, filetools, iges_mesh, img_io, pdf_io, step_mesh, tabular, xlsx_io
+# Alles lebt in einer Datei - die alten Modulnamen zeigen auf dasselbe Modul.
+import data_converter_gui as _app
+
+cad_io = filetools = iges_mesh = img_io = pdf_io = step_mesh = tabular = xlsx_io = _app
 
 
 def test_xlsx_roundtrip(root):
