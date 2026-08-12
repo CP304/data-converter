@@ -3,5 +3,5 @@
 Komplett auf Basis der Python-Standardbibliothek, keine Abhaengigkeiten.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 APP_TITLE = "Einkauf Data Converter"
