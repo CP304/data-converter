@@ -13,7 +13,7 @@ Inventar, E-Mail (.eml), Text-Encoding - jeweils mit Vorschau/Dry-Run,
 Live-Log, Undo und Presets.
 """
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 APP_TITLE = "Einkauf Data Converter"
 
 from collections import Counter
@@ -4274,17 +4274,26 @@ def read_image(path):
         return read_png(path)
     if ext == ".bmp":
         return read_bmp(path)
-    raise ValueError(f"Kein unterstütztes Bildformat: {ext} (nur PNG/BMP).")
+    if ext in (".jpg", ".jpeg"):
+        return read_jpeg(path)
+    if ext == ".gif":
+        return read_gif(path)
+    if ext in (".tif", ".tiff"):
+        return read_tiff(path)
+    raise ValueError(f"Kein unterstütztes Bildformat: {ext} (PNG/BMP/JPG/GIF/TIFF).")
 
 
-def write_image(image, path):
+def write_image(image, path, jpeg_quality=80, optimize_png=False):
     ext = Path(path).suffix.lower()
     if ext == ".png":
-        write_png(image, path)
+        if not (optimize_png and write_png_palette(image, path)):
+            write_png(image, path)
     elif ext == ".bmp":
         write_bmp(image, path)
+    elif ext in (".jpg", ".jpeg"):
+        write_jpeg(image, path, quality=jpeg_quality)
     else:
-        raise ValueError(f"Kein unterstütztes Bild-Zielformat: {ext} (nur PNG/BMP).")
+        raise ValueError(f"Kein unterstütztes Bild-Zielformat: {ext} (PNG/BMP/JPG).")
 
 
 # ---------------------------------------------------------------------------
@@ -4397,6 +4406,1030 @@ def watermark(image, text, opacity=0.45, color=(90, 90, 90)):
                             old = data[offset + ch]
                             data[offset + ch] = int(old * (1 - opacity) + color[ch] * opacity)
     return image
+
+
+# ===========================================================================
+# JPEG-Codec (Baseline, eigener Encoder/Decoder), GIF- und TIFF-Leser,
+# PNG-Optimierung (Palette) und PDF-Konvertierung (Text/Bilder/aus Bildern)
+# ===========================================================================
+
+_ZIGZAG = (0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+           12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+           35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+           58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63)
+
+_JPEG_Q_LUMA = (16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
+                14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+                18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+                49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99)
+_JPEG_Q_CHROMA = (17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99,
+                  24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99, 99, 99, 99, 99,
+                  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+                  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99)
+
+_DC_LUMA_BITS = (0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0)
+_DC_LUMA_VALS = tuple(range(12))
+_DC_CHROMA_BITS = (0, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0)
+_DC_CHROMA_VALS = tuple(range(12))
+_AC_LUMA_BITS = (0, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125)
+_AC_LUMA_VALS = (
+    0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
+    0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0,
+    0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+    0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+    0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+    0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+    0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5,
+    0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2,
+    0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8,
+    0xF9, 0xFA)
+_AC_CHROMA_BITS = (0, 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119)
+_AC_CHROMA_VALS = (
+    0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
+    0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xA1, 0xB1, 0xC1, 0x09, 0x23, 0x33, 0x52, 0xF0,
+    0x15, 0x62, 0x72, 0xD1, 0x0A, 0x16, 0x24, 0x34, 0xE1, 0x25, 0xF1, 0x17, 0x18, 0x19, 0x1A, 0x26,
+    0x27, 0x28, 0x29, 0x2A, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+    0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5,
+    0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3,
+    0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA,
+    0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8,
+    0xF9, 0xFA)
+
+_COS = [[math.cos((2 * x + 1) * u * math.pi / 16) for x in range(8)] for u in range(8)]
+_CU = [1 / math.sqrt(2)] + [1.0] * 7
+
+
+def _scale_quant(table, quality):
+    quality = max(1, min(95, int(quality)))
+    scale = 5000 / quality if quality < 50 else 200 - 2 * quality
+    return [max(1, min(255, int((value * scale + 50) // 100))) for value in table]
+
+
+class _JpegBitWriter:
+    def __init__(self):
+        self.out = bytearray()
+        self.acc = 0
+        self.count = 0
+
+    def write(self, value, length):
+        self.acc = (self.acc << length) | (value & ((1 << length) - 1))
+        self.count += length
+        while self.count >= 8:
+            self.count -= 8
+            byte = (self.acc >> self.count) & 0xFF
+            self.out.append(byte)
+            if byte == 0xFF:
+                self.out.append(0x00)
+
+    def flush(self):
+        while self.count % 8:                 # mit 1-Bits bis zur Bytegrenze
+            self.write(1, 1)
+
+
+def _huff_codes(bits, vals):
+    codes = {}
+    code = 0
+    index = 0
+    for length in range(1, 17):
+        for _ in range(bits[length]):
+            codes[vals[index]] = (code, length)
+            index += 1
+            code += 1
+        code <<= 1
+    return codes
+
+
+def _fdct_quant(block, quant):
+    shifted = [v - 128.0 for v in block]
+    tmp = [0.0] * 64
+    for u in range(8):
+        cos_u = _COS[u]
+        for y in range(8):
+            total = 0.0
+            base = y * 8
+            for x in range(8):
+                total += shifted[base + x] * cos_u[x]
+            tmp[u * 8 + y] = total
+    out = [0] * 64
+    for u in range(8):
+        for v in range(8):
+            cos_v = _COS[v]
+            total = 0.0
+            for y in range(8):
+                total += tmp[u * 8 + y] * cos_v[y]
+            value = 0.25 * _CU[u] * _CU[v] * total
+            out[v * 8 + u] = int(round(value / quant[v * 8 + u]))
+    return out
+
+
+def write_jpeg(image, path, quality=80):
+    """Baseline-JPEG schreiben (4:4:4). quality 1-95."""
+    rgb = flatten_to_rgb(image)
+    width, height = rgb.width, rgb.height
+    data = rgb.data
+
+    q_luma = _scale_quant(_JPEG_Q_LUMA, quality)
+    q_chroma = _scale_quant(_JPEG_Q_CHROMA, quality)
+    dc_l = _huff_codes(_DC_LUMA_BITS, _DC_LUMA_VALS)
+    ac_l = _huff_codes(_AC_LUMA_BITS, _AC_LUMA_VALS)
+    dc_c = _huff_codes(_DC_CHROMA_BITS, _DC_CHROMA_VALS)
+    ac_c = _huff_codes(_AC_CHROMA_BITS, _AC_CHROMA_VALS)
+
+    blocks_x = (width + 7) // 8
+    blocks_y = (height + 7) // 8
+    writer = _JpegBitWriter()
+    prev_dc = [0, 0, 0]
+
+    def encode_block(block, quant, dc_table, ac_table, comp):
+        coeffs = _fdct_quant(block, quant)
+        diff = coeffs[0] - prev_dc[comp]
+        prev_dc[comp] = coeffs[0]
+        magnitude = abs(diff)
+        size = magnitude.bit_length()
+        code, length = dc_table[size]
+        writer.write(code, length)
+        if size:
+            writer.write(diff if diff > 0 else diff + (1 << size) - 1, size)
+        run = 0
+        last_nonzero = 0
+        zigzagged = [coeffs[_ZIGZAG[k]] for k in range(64)]
+        for k in range(63, 0, -1):
+            if zigzagged[k]:
+                last_nonzero = k
+                break
+        for k in range(1, last_nonzero + 1):
+            value = zigzagged[k]
+            if value == 0:
+                run += 1
+                continue
+            while run > 15:
+                code, length = ac_table[0xF0]
+                writer.write(code, length)
+                run -= 16
+            size = abs(value).bit_length()
+            code, length = ac_table[(run << 4) | size]
+            writer.write(code, length)
+            writer.write(value if value > 0 else value + (1 << size) - 1, size)
+            run = 0
+        if last_nonzero < 63:
+            code, length = ac_table[0x00]
+            writer.write(code, length)
+
+    for by in range(blocks_y):
+        for bx in range(blocks_x):
+            y_block = [0.0] * 64
+            cb_block = [0.0] * 64
+            cr_block = [0.0] * 64
+            for yy in range(8):
+                sy = min(by * 8 + yy, height - 1)
+                row_base = sy * width
+                for xx in range(8):
+                    sx = min(bx * 8 + xx, width - 1)
+                    offset = (row_base + sx) * 3
+                    r, g, b = data[offset], data[offset + 1], data[offset + 2]
+                    idx = yy * 8 + xx
+                    y_block[idx] = 0.299 * r + 0.587 * g + 0.114 * b
+                    cb_block[idx] = -0.168736 * r - 0.331264 * g + 0.5 * b + 128
+                    cr_block[idx] = 0.5 * r - 0.418688 * g - 0.081312 * b + 128
+            encode_block(y_block, q_luma, dc_l, ac_l, 0)
+            encode_block(cb_block, q_chroma, dc_c, ac_c, 1)
+            encode_block(cr_block, q_chroma, dc_c, ac_c, 2)
+    writer.flush()
+
+    def segment(marker, payload):
+        return bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2) + payload
+
+    dpi = rgb.dpi or 96
+    out = bytearray(b"\xff\xd8")
+    out += segment(0xE0, b"JFIF\x00\x01\x01\x01" + struct.pack(">HH", dpi, dpi) + b"\x00\x00")
+    out += segment(0xDB, bytes([0]) + bytes(q_luma[_ZIGZAG[k]] for k in range(64)))
+    out += segment(0xDB, bytes([1]) + bytes(q_chroma[_ZIGZAG[k]] for k in range(64)))
+    out += segment(0xC0, struct.pack(">BHHB", 8, height, width, 3)
+                   + bytes((1, 0x11, 0)) + bytes((2, 0x11, 1)) + bytes((3, 0x11, 1)))
+    for table_class, table_id, bits, vals in ((0, 0, _DC_LUMA_BITS, _DC_LUMA_VALS),
+                                              (1, 0, _AC_LUMA_BITS, _AC_LUMA_VALS),
+                                              (0, 1, _DC_CHROMA_BITS, _DC_CHROMA_VALS),
+                                              (1, 1, _AC_CHROMA_BITS, _AC_CHROMA_VALS)):
+        out += segment(0xC4, bytes([(table_class << 4) | table_id])
+                       + bytes(bits[1:]) + bytes(vals))
+    out += segment(0xDA, bytes((3, 1, 0x00, 2, 0x11, 3, 0x11, 0, 63, 0)))
+    out += writer.out
+    out += b"\xff\xd9"
+    Path(path).write_bytes(bytes(out))
+
+
+# -- JPEG lesen -------------------------------------------------------------
+
+class _JpegBitReader:
+    def __init__(self, data, pos):
+        self.data = data
+        self.pos = pos
+        self.acc = 0
+        self.count = 0
+        self.marker = None
+
+    def _fill(self):
+        while self.count < 25:
+            if self.pos >= len(self.data):
+                self.acc = (self.acc << 8) | 0
+                self.count += 8
+                continue
+            byte = self.data[self.pos]
+            if byte == 0xFF:
+                nxt = self.data[self.pos + 1] if self.pos + 1 < len(self.data) else 0xD9
+                if nxt == 0x00:
+                    self.pos += 2
+                    self.acc = (self.acc << 8) | 0xFF
+                    self.count += 8
+                    continue
+                self.marker = nxt
+                self.acc = (self.acc << 8) | 0
+                self.count += 8
+                continue
+            self.pos += 1
+            self.acc = (self.acc << 8) | byte
+            self.count += 8
+
+    def bit(self):
+        if self.count == 0:
+            self._fill()
+        self.count -= 1
+        return (self.acc >> self.count) & 1
+
+    def receive(self, length):
+        value = 0
+        for _ in range(length):
+            value = (value << 1) | self.bit()
+        return value
+
+    def restart(self):
+        # Byte-Grenze + Restart-Marker ueberspringen
+        self.acc = 0
+        self.count = 0
+        while self.pos + 1 < len(self.data):
+            if self.data[self.pos] == 0xFF and 0xD0 <= self.data[self.pos + 1] <= 0xD7:
+                self.pos += 2
+                self.marker = None
+                return
+            self.pos += 1
+
+
+def _extend(value, size):
+    return value if value >= (1 << (size - 1)) else value - (1 << size) + 1
+
+
+def _idct(coeffs):
+    tmp = [0.0] * 64
+    for y in range(8):
+        for u in range(8):
+            total = 0.0
+            for v in range(8):
+                total += _CU[v] * coeffs[v * 8 + u] * _COS[v][y]
+            tmp[u * 8 + y] = total
+    out = [0] * 64
+    for y in range(8):
+        for x in range(8):
+            total = 0.0
+            for u in range(8):
+                total += _CU[u] * tmp[u * 8 + y] * _COS[u][x]
+            value = int(total * 0.25 + 128.5)
+            out[y * 8 + x] = 0 if value < 0 else 255 if value > 255 else value
+    return out
+
+
+def read_jpeg(path):
+    """Baseline-JPEG (SOF0/SOF1) dekodieren, inkl. 4:2:0/4:2:2 und Restart-Markern."""
+    data = Path(path).read_bytes()
+    if data[:2] != b"\xff\xd8":
+        raise ValueError("Keine JPEG-Datei.")
+    pos = 2
+    quant = {}
+    huff = {}
+    frame = None
+    restart_interval = 0
+    dpi = None
+    while pos < len(data):
+        if data[pos] != 0xFF:
+            pos += 1
+            continue
+        marker = data[pos + 1]
+        pos += 2
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            continue
+        if marker == 0xD9:
+            break
+        length = struct.unpack_from(">H", data, pos)[0]
+        payload = data[pos + 2:pos + length]
+        if marker == 0xDB:
+            offset = 0
+            while offset < len(payload):
+                precision = payload[offset] >> 4
+                table_id = payload[offset] & 0x0F
+                offset += 1
+                if precision:
+                    values = list(struct.unpack_from(f">{64}H", payload, offset))
+                    offset += 128
+                else:
+                    values = list(payload[offset:offset + 64])
+                    offset += 64
+                table = [0] * 64
+                for k in range(64):
+                    table[_ZIGZAG[k]] = values[k]
+                quant[table_id] = table
+        elif marker == 0xC4:
+            offset = 0
+            while offset < len(payload):
+                table_class = payload[offset] >> 4
+                table_id = payload[offset] & 0x0F
+                counts = list(payload[offset + 1:offset + 17])
+                total = sum(counts)
+                symbols = list(payload[offset + 17:offset + 17 + total])
+                offset += 17 + total
+                table = {}
+                code = 0
+                index = 0
+                for bit_length in range(1, 17):
+                    for _ in range(counts[bit_length - 1]):
+                        table[(bit_length, code)] = symbols[index]
+                        index += 1
+                        code += 1
+                    code <<= 1
+                huff[(table_class, table_id)] = table
+        elif marker in (0xC0, 0xC1):
+            precision, height, width, ncomp = struct.unpack_from(">BHHB", payload, 0)
+            if precision != 8:
+                raise ValueError("Nur 8-Bit-JPEG wird unterstützt.")
+            components = []
+            for c in range(ncomp):
+                cid, sampling, qid = payload[6 + c * 3:9 + c * 3]
+                components.append({"id": cid, "h": sampling >> 4, "v": sampling & 0x0F, "q": qid})
+            frame = {"w": width, "h": height, "comps": components}
+        elif marker == 0xC2:
+            raise ValueError("Progressives JPEG wird nicht unterstützt - Datei einmal "
+                             "als Baseline speichern (oder PNG anliefern).")
+        elif marker in (0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            raise ValueError("Dieses JPEG-Verfahren wird nicht unterstützt (nur Baseline).")
+        elif marker == 0xDD:
+            restart_interval = struct.unpack_from(">H", payload, 0)[0]
+        elif marker == 0xE0 and payload[:5] == b"JFIF\x00":
+            unit = payload[7]
+            xd = struct.unpack_from(">H", payload, 8)[0]
+            if unit == 1 and xd:
+                dpi = xd
+            elif unit == 2 and xd:
+                dpi = round(xd * 2.54)
+        elif marker == 0xDA:
+            ncomp = payload[0]
+            scan = []
+            for c in range(ncomp):
+                cid, tables = payload[1 + c * 2:3 + c * 2]
+                scan.append({"id": cid, "dc": tables >> 4, "ac": tables & 0x0F})
+            pos += length
+            return _decode_scan(data, pos, frame, scan, quant, huff, restart_interval, dpi)
+        pos += length
+    raise ValueError("Kein Bildinhalt im JPEG gefunden.")
+
+
+def _decode_scan(data, pos, frame, scan, quant, huff, restart_interval, dpi):
+    if frame is None:
+        raise ValueError("JPEG ohne Frame-Header.")
+    width, height = frame["w"], frame["h"]
+    comps = frame["comps"]
+    if len(comps) not in (1, 3):
+        raise ValueError("Nur Graustufen- und YCbCr-JPEG werden unterstützt (kein CMYK).")
+    hmax = max(c["h"] for c in comps)
+    vmax = max(c["v"] for c in comps)
+    mcus_x = (width + 8 * hmax - 1) // (8 * hmax)
+    mcus_y = (height + 8 * vmax - 1) // (8 * vmax)
+    scan_by_id = {s["id"]: s for s in scan}
+    planes = []
+    for comp in comps:
+        pw = mcus_x * comp["h"] * 8
+        ph = mcus_y * comp["v"] * 8
+        planes.append(bytearray(pw * ph))
+        comp["pw"], comp["ph"] = pw, ph
+
+    reader = _JpegBitReader(data, pos)
+    prev_dc = [0] * len(comps)
+
+    def decode_huff(table):
+        code = 0
+        for bit_length in range(1, 17):
+            code = (code << 1) | reader.bit()
+            symbol = table.get((bit_length, code))
+            if symbol is not None:
+                return symbol
+        raise ValueError("Defekter Huffman-Strom.")
+
+    mcu_index = 0
+    for my in range(mcus_y):
+        for mx in range(mcus_x):
+            if restart_interval and mcu_index and mcu_index % restart_interval == 0:
+                reader.restart()
+                prev_dc = [0] * len(comps)
+            mcu_index += 1
+            for ci, comp in enumerate(comps):
+                s = scan_by_id.get(comp["id"], scan[ci])
+                dc_table = huff[(0, s["dc"])]
+                ac_table = huff[(1, s["ac"])]
+                qt = quant[comp["q"]]
+                for by in range(comp["v"]):
+                    for bx in range(comp["h"]):
+                        coeffs = [0] * 64
+                        size = decode_huff(dc_table)
+                        diff = _extend(reader.receive(size), size) if size else 0
+                        prev_dc[ci] += diff
+                        coeffs[0] = prev_dc[ci] * qt[0]
+                        k = 1
+                        while k < 64:
+                            symbol = decode_huff(ac_table)
+                            if symbol == 0x00:
+                                break
+                            run = symbol >> 4
+                            size = symbol & 0x0F
+                            if size == 0:
+                                if run == 15:
+                                    k += 16
+                                    continue
+                                break
+                            k += run
+                            if k > 63:
+                                break
+                            coeffs[_ZIGZAG[k]] = _extend(reader.receive(size), size) * qt[_ZIGZAG[k]]
+                            k += 1
+                        pixels = _idct(coeffs)
+                        plane = planes[ci]
+                        pw = comp["pw"]
+                        ox = (mx * comp["h"] + bx) * 8
+                        oy = (my * comp["v"] + by) * 8
+                        for yy in range(8):
+                            row = (oy + yy) * pw + ox
+                            plane[row:row + 8] = bytes(pixels[yy * 8:yy * 8 + 8])
+
+    out = bytearray(width * height * 3)
+    if len(comps) == 1:
+        plane = planes[0]
+        pw = comps[0]["pw"]
+        for y in range(height):
+            for x in range(width):
+                value = plane[y * pw + x]
+                offset = (y * width + x) * 3
+                out[offset] = out[offset + 1] = out[offset + 2] = value
+        return Image(width, height, "RGB", out, dpi)
+
+    y_plane, cb_plane, cr_plane = planes
+    yc, cbc, crc = comps
+    for y in range(height):
+        y_row = y * yc["pw"]
+        cb_row = (y * cbc["v"] // vmax) * cbc["pw"]
+        cr_row = (y * crc["v"] // vmax) * crc["pw"]
+        for x in range(width):
+            lum = y_plane[y_row + x * yc["h"] // hmax]
+            cb = cb_plane[cb_row + x * cbc["h"] // hmax] - 128
+            cr = cr_plane[cr_row + x * crc["h"] // hmax] - 128
+            r = lum + 1.402 * cr
+            g = lum - 0.344136 * cb - 0.714136 * cr
+            b = lum + 1.772 * cb
+            offset = (y * width + x) * 3
+            out[offset] = 0 if r < 0 else 255 if r > 255 else int(r)
+            out[offset + 1] = 0 if g < 0 else 255 if g > 255 else int(g)
+            out[offset + 2] = 0 if b < 0 else 255 if b > 255 else int(b)
+    return Image(width, height, "RGB", out, dpi)
+
+
+def jpeg_size(data):
+    """(Breite, Hoehe, Komponenten) aus den JPEG-Markern lesen."""
+    pos = 2
+    while pos < len(data) - 8:
+        if data[pos] != 0xFF:
+            pos += 1
+            continue
+        marker = data[pos + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            _p, height, width, ncomp = struct.unpack_from(">BHHB", data, pos + 4)
+            return width, height, ncomp
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            pos += 2
+            continue
+        pos += 2 + struct.unpack_from(">H", data, pos + 2)[0]
+    raise ValueError("JPEG-Groesse nicht lesbar.")
+
+
+# -- GIF lesen ----------------------------------------------------------------
+
+def read_gif(path):
+    """Erstes Bild einer GIF-Datei dekodieren (LZW, Transparenz)."""
+    data = Path(path).read_bytes()
+    if data[:3] != b"GIF":
+        raise ValueError("Keine GIF-Datei.")
+    width, height = struct.unpack_from("<HH", data, 6)
+    flags = data[10]
+    pos = 13
+    global_palette = b""
+    if flags & 0x80:
+        size = 2 << (flags & 0x07)
+        global_palette = data[pos:pos + size * 3]
+        pos += size * 3
+    transparent = None
+    while pos < len(data):
+        block = data[pos]
+        if block == 0x21:                                # Extension
+            label = data[pos + 1]
+            pos += 2
+            if label == 0xF9 and data[pos] >= 4:
+                if data[pos + 1] & 1:
+                    transparent = data[pos + 4]
+            while data[pos]:
+                pos += 1 + data[pos]
+            pos += 1
+        elif block == 0x2C:                              # Image Descriptor
+            ix, iy, iw, ih = struct.unpack_from("<HHHH", data, pos + 1)
+            iflags = data[pos + 9]
+            pos += 10
+            palette = global_palette
+            if iflags & 0x80:
+                size = 2 << (iflags & 0x07)
+                palette = data[pos:pos + size * 3]
+                pos += size * 3
+            interlaced = bool(iflags & 0x40)
+            min_code = data[pos]
+            pos += 1
+            chunks = []
+            while data[pos]:
+                count = data[pos]
+                chunks.append(data[pos + 1:pos + 1 + count])
+                pos += 1 + count
+            pos += 1
+            indices = _gif_lzw(b"".join(chunks), min_code, iw * ih)
+            if interlaced:
+                rows = []
+                for start, step in ((0, 8), (4, 8), (2, 4), (1, 2)):
+                    rows.extend(range(start, ih, step))
+                ordered = bytearray(iw * ih)
+                for source_row, target_row in enumerate(rows):
+                    ordered[target_row * iw:(target_row + 1) * iw] = \
+                        indices[source_row * iw:(source_row + 1) * iw]
+                indices = ordered
+            has_alpha = transparent is not None
+            channels = 4 if has_alpha else 3
+            out = bytearray(width * height * channels)
+            if has_alpha:
+                for i in range(0, len(out), 4):
+                    out[i + 3] = 255
+            for row in range(ih):
+                for col in range(iw):
+                    idx = indices[row * iw + col]
+                    tx, ty = ix + col, iy + row
+                    if tx >= width or ty >= height:
+                        continue
+                    offset = (ty * width + tx) * channels
+                    base = idx * 3
+                    if base + 2 < len(palette):
+                        out[offset:offset + 3] = palette[base:base + 3]
+                    if has_alpha:
+                        out[offset + 3] = 0 if idx == transparent else 255
+            return Image(width, height, "RGBA" if has_alpha else "RGB", out)
+        else:
+            break
+    raise ValueError("Kein Bild in der GIF-Datei gefunden.")
+
+
+def _gif_lzw(data, min_code, expected):
+    clear = 1 << min_code
+    end = clear + 1
+    table = [bytes([i]) for i in range(clear)] + [b"", b""]
+    width = min_code + 1
+    out = bytearray()
+    acc = 0
+    bits = 0
+    prev = None
+    for byte in data:
+        acc |= byte << bits
+        bits += 8
+        while bits >= width:
+            code = acc & ((1 << width) - 1)
+            acc >>= width
+            bits -= width
+            if code == clear:
+                table = [bytes([i]) for i in range(clear)] + [b"", b""]
+                width = min_code + 1
+                prev = None
+                continue
+            if code == end:
+                return out
+            if prev is None:
+                entry = table[code]
+            elif code < len(table):
+                entry = table[code]
+                table.append(prev + entry[:1])
+            else:
+                entry = prev + prev[:1]
+                table.append(entry)
+            out += entry
+            prev = entry
+            if len(table) >= (1 << width) and width < 12:
+                width += 1
+            if len(out) >= expected:
+                return out
+    return out
+
+
+# -- TIFF lesen ---------------------------------------------------------------
+
+def read_tiff(path):
+    """Baseline-TIFF: 8 Bit, unkomprimiert/PackBits/LZW, Grau/RGB/Palette."""
+    data = Path(path).read_bytes()
+    if data[:2] == b"II":
+        endian = "<"
+    elif data[:2] == b"MM":
+        endian = ">"
+    else:
+        raise ValueError("Keine TIFF-Datei.")
+    if struct.unpack_from(endian + "H", data, 2)[0] != 42:
+        raise ValueError("Kein klassisches TIFF (BigTIFF wird nicht unterstützt).")
+    ifd = struct.unpack_from(endian + "I", data, 4)[0]
+    count = struct.unpack_from(endian + "H", data, ifd)[0]
+    tags = {}
+    type_sizes = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}
+    for i in range(count):
+        base = ifd + 2 + i * 12
+        tag, ftype, num = struct.unpack_from(endian + "HHI", data, base)
+        size = type_sizes.get(ftype, 1) * num
+        offset = base + 8 if size <= 4 else struct.unpack_from(endian + "I", data, base + 8)[0]
+        fmt = {1: "B", 3: "H", 4: "I"}.get(ftype)
+        if fmt:
+            tags[tag] = list(struct.unpack_from(endian + str(num) + fmt, data, offset))
+
+    def tag(tid, default=None):
+        values = tags.get(tid)
+        return values[0] if values else default
+
+    width = tag(256)
+    height = tag(257)
+    bits = tags.get(258, [8])
+    compression = tag(259, 1)
+    photometric = tag(262, 1)
+    samples = tag(277, 1)
+    rows_per_strip = tag(278, height)
+    predictor = tag(317, 1)
+    if width is None or height is None:
+        raise ValueError("TIFF ohne Bildmaße.")
+    if any(b != 8 for b in bits):
+        raise ValueError(f"TIFF mit {bits} Bit wird nicht unterstützt (nur 8 Bit).")
+    if tag(284, 1) != 1:
+        raise ValueError("TIFF mit Planar-Layout wird nicht unterstützt.")
+    if compression not in (1, 5, 32773):
+        raise ValueError(f"TIFF-Kompression {compression} wird nicht unterstützt "
+                         "(nur unkomprimiert, LZW, PackBits).")
+
+    raw = bytearray()
+    offsets = tags.get(273, [])
+    counts = tags.get(279, [len(data)] * len(offsets))
+    for offset, length in zip(offsets, counts):
+        chunk = data[offset:offset + length]
+        if compression == 32773:
+            raw += _packbits(chunk)
+        elif compression == 5:
+            raw += _tiff_lzw(chunk)
+        else:
+            raw += chunk
+    stride = width * samples
+    if predictor == 2:
+        for row in range(height):
+            base = row * stride
+            for i in range(samples, stride):
+                raw[base + i] = (raw[base + i] + raw[base + i - samples]) & 0xFF
+
+    if photometric == 3:                                 # Palette
+        colormap = tags.get(320, [])
+        third = len(colormap) // 3
+        out = bytearray(width * height * 3)
+        for i in range(width * height):
+            idx = raw[i]
+            out[i * 3] = colormap[idx] >> 8
+            out[i * 3 + 1] = colormap[third + idx] >> 8
+            out[i * 3 + 2] = colormap[2 * third + idx] >> 8
+        return Image(width, height, "RGB", out)
+    if samples == 1:
+        out = bytearray(width * height * 3)
+        for i in range(width * height):
+            value = raw[i] if photometric != 0 else 255 - raw[i]
+            out[i * 3] = out[i * 3 + 1] = out[i * 3 + 2] = value
+        return Image(width, height, "RGB", out)
+    if samples == 3:
+        return Image(width, height, "RGB", raw[:width * height * 3])
+    if samples == 4:
+        return Image(width, height, "RGBA", raw[:width * height * 4])
+    raise ValueError(f"TIFF mit {samples} Kanälen wird nicht unterstützt.")
+
+
+def _packbits(data):
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        n = data[i]
+        i += 1
+        if n < 128:
+            out += data[i:i + n + 1]
+            i += n + 1
+        elif n > 128:
+            out += bytes([data[i]]) * (257 - n)
+            i += 1
+    return out
+
+
+def _tiff_lzw(data):
+    clear, end = 256, 257
+    width = 9
+    table = [bytes([i]) for i in range(256)] + [b"", b""]
+    out = bytearray()
+    acc = 0
+    bits = 0
+    prev = None
+    for byte in data:
+        acc = (acc << 8) | byte
+        bits += 8
+        while bits >= width:
+            code = (acc >> (bits - width)) & ((1 << width) - 1)
+            bits -= width
+            if code == clear:
+                table = [bytes([i]) for i in range(256)] + [b"", b""]
+                width = 9
+                prev = None
+                continue
+            if code == end:
+                return out
+            if prev is None:
+                entry = table[code]
+            elif code < len(table):
+                entry = table[code]
+                table.append(prev + entry[:1])
+            else:
+                entry = prev + prev[:1]
+                table.append(entry)
+            out += entry
+            prev = entry
+            if len(table) >= (1 << width) - 1 and width < 12:  # TIFF: early change
+                width += 1
+    return out
+
+
+# -- PNG-Optimierung (Palette) --------------------------------------------------
+
+def write_png_palette(image, path):
+    """PNG mit Farbpalette schreiben (deutlich kleiner bei <=256 Farben).
+
+    Liefert True bei Erfolg, False wenn das Bild nicht geeignet ist
+    (zu viele Farben oder echte Teiltransparenz).
+    """
+    rgb = image
+    if image.mode == "RGBA":
+        if any(image.data[i + 3] != 255 for i in range(0, len(image.data), 4)):
+            return False
+        rgb = flatten_to_rgb(image)
+    colors = {}
+    pixel_count = rgb.width * rgb.height
+    for i in range(pixel_count):
+        key = bytes(rgb.data[i * 3:i * 3 + 3])
+        colors[key] = colors.get(key, 0) + 1
+        if len(colors) > 4096:
+            return False
+    palette = _median_cut(colors, 256) if len(colors) > 256 else list(colors)
+    lookup = {}
+    indices = bytearray(pixel_count)
+    for i in range(pixel_count):
+        key = bytes(rgb.data[i * 3:i * 3 + 3])
+        idx = lookup.get(key)
+        if idx is None:
+            idx = min(range(len(palette)),
+                      key=lambda p: (palette[p][0] - key[0]) ** 2
+                      + (palette[p][1] - key[1]) ** 2 + (palette[p][2] - key[2]) ** 2)
+            lookup[key] = idx
+        indices[i] = idx
+
+    raw = bytearray()
+    for row in range(rgb.height):
+        raw.append(0)
+        raw += indices[row * rgb.width:(row + 1) * rgb.width]
+    out = bytearray(_PNG_SIG)
+    out += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", rgb.width, rgb.height, 8, 3, 0, 0, 0))
+    out += _png_chunk(b"PLTE", b"".join(bytes(c) for c in palette))
+    if rgb.dpi:
+        ppm = round(rgb.dpi / 0.0254)
+        out += _png_chunk(b"pHYs", struct.pack(">IIB", ppm, ppm, 1))
+    out += _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+    out += _png_chunk(b"IEND", b"")
+    Path(path).write_bytes(bytes(out))
+    return True
+
+
+def _median_cut(color_counts, max_colors):
+    boxes = [list(color_counts.items())]
+    while len(boxes) < max_colors:
+        boxes.sort(key=lambda box: -max(
+            max(c[0][ch] for c in box) - min(c[0][ch] for c in box) for ch in range(3)))
+        box = boxes[0]
+        if len(box) <= 1:
+            break
+        spans = [max(c[0][ch] for c in box) - min(c[0][ch] for c in box) for ch in range(3)]
+        channel = spans.index(max(spans))
+        box.sort(key=lambda c: c[0][channel])
+        middle = len(box) // 2
+        boxes[0:1] = [box[:middle], box[middle:]]
+    palette = []
+    for box in boxes:
+        total = sum(count for _c, count in box) or 1
+        palette.append(tuple(sum(color[ch] * count for color, count in box) // total
+                             for ch in range(3)))
+    return palette
+
+
+# -- PDF-Konvertierung ----------------------------------------------------------
+
+def images_to_pdf(entries, target_path, log=None):
+    """Bilder zu einer PDF. entries: Liste aus Path (JPEG wird 1:1 eingebettet)
+    oder (name, Image)."""
+    writer = PdfWriter()
+    page_refs = []
+    for entry in entries:
+        if isinstance(entry, Path):
+            name = entry.name
+            ext = entry.suffix.lower()
+            if ext in (".jpg", ".jpeg"):
+                blob = entry.read_bytes()
+                width, height, ncomp = jpeg_size(blob)
+                colorspace = PName("DeviceRGB") if ncomp == 3 else PName("DeviceGray")
+                xobj = writer.add({"Type": PName("XObject"), "Subtype": PName("Image"),
+                                   "Width": width, "Height": height,
+                                   "ColorSpace": colorspace, "BitsPerComponent": 8,
+                                   "Filter": PName("DCTDecode")}, blob)
+                dpi = 96
+            else:
+                image = read_image(entry)
+                name, xobj, width, height, dpi = entry.name, None, image.width, image.height, image.dpi or 96
+                entry = (entry.name, image)
+        if isinstance(entry, tuple):
+            name, image = entry
+            rgb = flatten_to_rgb(image)
+            width, height = rgb.width, rgb.height
+            dpi = rgb.dpi or 96
+            xobj = writer.add({"Type": PName("XObject"), "Subtype": PName("Image"),
+                               "Width": width, "Height": height,
+                               "ColorSpace": PName("DeviceRGB"), "BitsPerComponent": 8,
+                               "Filter": PName("FlateDecode")}, zlib.compress(bytes(rgb.data), 6))
+        w_pt = width * 72.0 / dpi
+        h_pt = height * 72.0 / dpi
+        content = writer.add({}, f"q {w_pt:.2f} 0 0 {h_pt:.2f} 0 0 cm /Im0 Do Q".encode("ascii"))
+        page = writer.add({"Type": PName("Page"),
+                           "MediaBox": [0, 0, round(w_pt, 2), round(h_pt, 2)],
+                           "Resources": {"XObject": {"Im0": xobj}},
+                           "Contents": content})
+        page_refs.append(page)
+        if log:
+            log(f"SEITE: {name} ({width}×{height})")
+    writer.save(target_path, page_refs)
+    return len(page_refs)
+
+
+def _decoded_stream(doc, obj):
+    filters = doc.resolve(obj.value.get("Filter"))
+    if isinstance(filters, PName) or isinstance(filters, str):
+        filters = [filters]
+    filters = [str(f) for f in (filters or [])]
+    stream = obj.stream or b""
+    if not filters:
+        return stream
+    if filters == ["FlateDecode"]:
+        try:
+            return zlib.decompress(stream)
+        except zlib.error:
+            return None
+    return None
+
+
+def pdf_extract_text(path, target_path, log=None):
+    """Text aus Content-Streams ziehen (Tj/TJ/'/\"). Encoding ist eine Annäherung -
+    bei exotischen Schrift-Encodings kann Zeichensalat entstehen."""
+    doc = PdfDocument(path)
+    pages = doc.pages()
+    lines = []
+    for number, (page_ref, _inherited) in enumerate(pages, start=1):
+        page = doc.resolve(page_ref)
+        contents = page.get("Contents")
+        refs = contents if isinstance(contents, list) else [contents]
+        stream = b""
+        for ref in refs:
+            if ref is None:
+                continue
+            obj = doc.objects.get(int(ref)) if isinstance(ref, PRef) else None
+            if obj is not None:
+                decoded = _decoded_stream(doc, obj)
+                if decoded:
+                    stream += decoded + b"\n"
+        text = _content_stream_text(stream)
+        lines.append(f"----- Seite {number} -----")
+        lines.append(text.strip())
+        lines.append("")
+    result = "\n".join(lines).strip() + "\n"
+    Path(target_path).write_text(result, encoding="utf-8")
+    if log:
+        log(f"TEXT: {len(pages)} Seite(n) → {Path(target_path).name}")
+    return len(result)
+
+
+def _content_stream_text(stream):
+    parts = []
+    lexer = _Lexer(stream)
+    pos = 0
+    operands = []
+    length = len(stream)
+    while pos < length:
+        ch = stream[pos:pos + 1]
+        if ch in _WHITESPACE:
+            pos += 1
+            continue
+        if ch in (b"(", b"<", b"[", b"/") or ch.isdigit() or ch in (b"-", b"+", b"."):
+            lexer.pos = pos
+            try:
+                value = lexer.parse()
+            except PdfError:
+                pos += 1
+                continue
+            pos = lexer.pos
+            operands.append(value)
+            continue
+        match = re.match(rb"[A-Za-z'\"*]+", stream[pos:])
+        if not match:
+            pos += 1
+            continue
+        op = match.group(0)
+        pos += match.end()
+        if op in (b"Tj", b"'", b'"'):
+            for value in operands:
+                if isinstance(value, bytes):
+                    parts.append(value.decode("cp1252", errors="replace"))
+            if op in (b"'", b'"'):
+                parts.append("\n")
+        elif op == b"TJ":
+            for value in operands:
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, bytes):
+                            parts.append(item.decode("cp1252", errors="replace"))
+        elif op in (b"Td", b"TD", b"T*", b"ET"):
+            if parts and not parts[-1].endswith("\n"):
+                parts.append("\n")
+        operands = []
+    return "".join(parts)
+
+
+def pdf_extract_images(path, target_dir, stem="", log=None):
+    """Eingebettete Bilder (DCTDecode -> .jpg, FlateDecode-RGB/Gray -> .png) speichern."""
+    doc = PdfDocument(path)
+    target_dir = Path(target_dir)
+    saved = []
+    skipped = 0
+    for num, obj in sorted(doc.objects.items()):
+        value = obj.value
+        if not (isinstance(value, dict) and value.get("Subtype") == "Image" and obj.stream):
+            continue
+        filters = doc.resolve(value.get("Filter"))
+        filters = [str(f) for f in (filters if isinstance(filters, list) else [filters] if filters else [])]
+        width = doc.resolve(value.get("Width"))
+        height = doc.resolve(value.get("Height"))
+        name = f"{stem}_bild{len(saved) + 1:02d}" if stem else f"bild{len(saved) + 1:02d}"
+        if "DCTDecode" in filters:
+            target = unique_path(target_dir / f"{name}.jpg")
+            target.write_bytes(obj.stream)
+            saved.append(target)
+        elif filters in ([], ["FlateDecode"]) and doc.resolve(value.get("BitsPerComponent", 8)) == 8:
+            raw = _decoded_stream(doc, obj)
+            colorspace = doc.resolve(value.get("ColorSpace"))
+            if raw is None or not isinstance(width, int) or not isinstance(height, int):
+                skipped += 1
+                continue
+            if colorspace == "DeviceRGB" and len(raw) >= width * height * 3:
+                image = Image(width, height, "RGB", bytearray(raw[:width * height * 3]))
+            elif colorspace == "DeviceGray" and len(raw) >= width * height:
+                rgb = bytearray(width * height * 3)
+                for i in range(width * height):
+                    rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = raw[i]
+                image = Image(width, height, "RGB", rgb)
+            else:
+                skipped += 1
+                continue
+            target = unique_path(target_dir / f"{name}.png")
+            write_png(image, target)
+            saved.append(target)
+        else:
+            skipped += 1
+    if log:
+        note = f", {skipped} übersprungen (Format)" if skipped else ""
+        log(f"BILDER: {len(saved)} extrahiert{note}")
+    return saved
 
 
 # ===========================================================================
@@ -5212,7 +6245,9 @@ PDF_MODES = {"mergen": "Zusammenführen",
              "auszug": "Auszug",
              "drehen": "Seiten drehen",
              "umsortieren": "Umsortieren",
-             "abdecken": "Zone abdecken"}
+             "abdecken": "Zone abdecken",
+             "text": "→ Text (TXT)",
+             "bilderraus": "Bilder extrahieren"}
 
 
 class PdfTab(ToolTab):
@@ -5226,9 +6261,12 @@ class PdfTab(ToolTab):
         row1 = ttk.Frame(parent, style="Card.TFrame")
         row1.pack(fill="x")
         self.mode_var = tk.StringVar(value="mergen")
-        for value, label in PDF_MODES.items():
-            ttk.Radiobutton(row1, text=label, value=value, variable=self.mode_var,
+        row1b = ttk.Frame(parent, style="Card.TFrame")
+        for index, (value, label) in enumerate(PDF_MODES.items()):
+            parent_row = row1 if index < 6 else row1b
+            ttk.Radiobutton(parent_row, text=label, value=value, variable=self.mode_var,
                             style="Card.TRadiobutton").pack(side="left", padx=(0, 12))
+        row1b.pack(fill="x", pady=(4, 0))
 
         row2 = ttk.Frame(parent, style="Card.TFrame")
         row2.pack(fill="x", pady=(8, 0))
@@ -5288,7 +6326,9 @@ class PdfTab(ToolTab):
         labels = {"splitten": "jede Seite einzeln", "auszug": f"Auszug {self.run_cfg['ranges'] or 'alle'}",
                   "drehen": f"um {self.run_cfg['angle']}° drehen",
                   "umsortieren": f"Reihenfolge {self.run_cfg['order']}",
-                  "abdecken": f"Zone abdecken ({self.run_cfg['color']})"}
+                  "abdecken": f"Zone abdecken ({self.run_cfg['color']})",
+                  "text": "Text extrahieren (TXT)",
+                  "bilderraus": "eingebettete Bilder extrahieren"}
         return [PlanItem(path.name, format_size(path.stat().st_size),
                          labels[mode], payload=path) for path in files]
 
@@ -5325,6 +6365,14 @@ class PdfTab(ToolTab):
                     target = unique_path(cfg["target_dir"] / (path.stem + "_sortiert.pdf"))
                     count = reorder_pdf(path, target, cfg["order"], log=ctx.log)
                     ctx.item(idx, f"OK ({count})")
+                elif cfg["mode"] == "text":
+                    target = unique_path(cfg["target_dir"] / (path.stem + ".txt"))
+                    pdf_extract_text(path, target, log=ctx.log)
+                    ctx.item(idx, "OK")
+                    ctx.log(f"OK: {path.name} → {target.name}", "ok")
+                elif cfg["mode"] == "bilderraus":
+                    saved = pdf_extract_images(path, cfg["target_dir"], stem=path.stem, log=ctx.log)
+                    ctx.item(idx, f"OK ({len(saved)})")
                 else:
                     target = unique_path(cfg["target_dir"] / (path.stem + "_abgedeckt.pdf"))
                     covered = redact_pdf(path, target, cfg["zone"], cfg["color"],
@@ -5360,8 +6408,8 @@ class PdfTab(ToolTab):
 class BilderTab(ToolTab):
     key = "bilder"
     title = "Bilder"
-    hint = "PNG ↔ BMP – skalieren, Wasserzeichen, DPI (eigener Codec; JPEG braucht echte Codecs)"
-    default_exts = "png, bmp"
+    hint = "PNG · BMP · JPG · GIF · TIFF → PNG · BMP · JPG · PDF – eigene Codecs"
+    default_exts = "png, bmp, jpg, jpeg, gif, tif, tiff"
     target_subfolder = "_bilder"
 
     def build_options(self, parent):
@@ -5370,31 +6418,55 @@ class BilderTab(ToolTab):
         ttk.Label(row, text="Zielformate", style="CardSub.TLabel").pack(side="left")
         self.png_var = tk.BooleanVar(value=True)
         self.bmp_var = tk.BooleanVar(value=False)
+        self.jpg_var = tk.BooleanVar(value=False)
+        self.pdf_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row, text="PNG", variable=self.png_var, style="Card.TCheckbutton").pack(side="left", padx=(8, 0))
-        ttk.Checkbutton(row, text="BMP", variable=self.bmp_var, style="Card.TCheckbutton").pack(side="left", padx=(8, 14))
-        ttk.Label(row, text="max. Breite px (leer = original)", style="CardSub.TLabel").pack(side="left")
+        ttk.Checkbutton(row, text="BMP", variable=self.bmp_var, style="Card.TCheckbutton").pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(row, text="JPG", variable=self.jpg_var, style="Card.TCheckbutton").pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(row, text="PDF", variable=self.pdf_var, style="Card.TCheckbutton").pack(side="left", padx=(8, 14))
+        ttk.Label(row, text="max. Breite px", style="CardSub.TLabel").pack(side="left")
         self.width_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.width_var, width=7).pack(side="left", padx=(6, 14))
-        ttk.Label(row, text="DPI setzen (leer = beibehalten)", style="CardSub.TLabel").pack(side="left")
+        ttk.Label(row, text="DPI", style="CardSub.TLabel").pack(side="left")
         self.dpi_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.dpi_var, width=6).pack(side="left", padx=(6, 14))
-        ttk.Label(row, text="Wasserzeichen-Text", style="CardSub.TLabel").pack(side="left")
+        ttk.Label(row, text="Wasserzeichen", style="CardSub.TLabel").pack(side="left")
         self.mark_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.mark_var, width=18).pack(side="left", padx=(6, 0))
+        ttk.Entry(row, textvariable=self.mark_var, width=16).pack(side="left", padx=(6, 0))
 
         row2 = ttk.Frame(parent, style="Card.TFrame")
         row2.pack(fill="x", pady=(8, 0))
-        ttk.Label(row2, text="Zuschneiden % (x, y, Breite, Höhe von links oben; leer = aus)",
+        ttk.Label(row2, text="Komprimierung: JPEG-Qualität", style="CardSub.TLabel").pack(side="left")
+        self.quality_var = tk.StringVar(value="80")
+        ttk.Spinbox(row2, from_=1, to=95, textvariable=self.quality_var, width=5).pack(side="left", padx=(6, 14))
+        self.optimize_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2, text="PNG optimieren (Palette, wenn ≤ 256 Farben)",
+                        variable=self.optimize_var, style="Card.TCheckbutton").pack(side="left", padx=(0, 14))
+        self.pdf_combine_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="PDF: alle Bilder in eine Datei",
+                        variable=self.pdf_combine_var, style="Card.TCheckbutton").pack(side="left")
+
+        row3 = ttk.Frame(parent, style="Card.TFrame")
+        row3.pack(fill="x", pady=(8, 0))
+        ttk.Label(row3, text="Zuschneiden % (x, y, Breite, Höhe von links oben; leer = aus)",
                   style="CardSub.TLabel").pack(side="left")
         self.crop_vars = [tk.StringVar() for _ in range(4)]
         for var in self.crop_vars:
-            ttk.Entry(row2, textvariable=var, width=5).pack(side="left", padx=(4, 0))
+            ttk.Entry(row3, textvariable=var, width=5).pack(side="left", padx=(4, 0))
+        ttk.Label(row3, text="Hinweis: progressive JPEGs werden (noch) nicht gelesen; "
+                            "große Fotos brauchen etwas Zeit (reiner Python-Codec).",
+                  style="CardSub.TLabel").pack(side="left", padx=(14, 0))
 
     def make_plan(self):
         files = self.source.collect()
-        formats = [ext for ext, var in ((".png", self.png_var), (".bmp", self.bmp_var)) if var.get()]
+        formats = [ext for ext, var in ((".png", self.png_var), (".bmp", self.bmp_var),
+                                        (".jpg", self.jpg_var), (".pdf", self.pdf_var)) if var.get()]
         if not formats:
-            raise ValueError("Bitte mindestens ein Zielformat anhaken (PNG oder BMP).")
+            raise ValueError("Bitte mindestens ein Zielformat anhaken (PNG, BMP, JPG oder PDF).")
+        try:
+            quality = max(1, min(95, int(self.quality_var.get())))
+        except ValueError:
+            raise ValueError("JPEG-Qualität muss eine Zahl von 1 bis 95 sein.")
         width = dpi = None
         if self.width_var.get().strip():
             try:
@@ -5415,16 +6487,39 @@ class BilderTab(ToolTab):
                 raise ValueError("Zuschneiden: alle vier Werte als Zahlen angeben (oder alle leer).")
         target_dir = self.target.resolve(self.source.base_dir())
         self.log_dir = target_dir
+        combine = self.pdf_combine_var.get()
         self.run_cfg = {"files": files, "formats": formats, "target_dir": target_dir,
                         "width": width, "dpi": dpi, "mark": self.mark_var.get().strip(),
-                        "crop": crop}
+                        "crop": crop, "quality": quality,
+                        "optimize": self.optimize_var.get(), "pdf_combine": combine}
         plan = []
         for path in files:
             size = format_size(path.stat().st_size)
             for ext in formats:
+                if ext == ".pdf" and combine:
+                    continue
                 plan.append(PlanItem(path.name, size, str(target_dir / (path.stem + ext)),
                                      payload=(path, ext)))
+        if ".pdf" in formats and combine:
+            total = sum(p.stat().st_size for p in files)
+            plan.append(PlanItem(f"{len(files)} Bild(er)", format_size(total),
+                                 str(target_dir / "bilder.pdf")))
         return plan
+
+    def _process(self, path, cfg):
+        image = read_image(path)
+        if cfg["crop"]:
+            image = crop(image, cfg["crop"])
+        if cfg["width"] and image.width > cfg["width"]:
+            image = resize(image, cfg["width"])
+        if cfg["dpi"]:
+            image.dpi = cfg["dpi"]
+        if cfg["mark"]:
+            image = watermark(image, cfg["mark"])
+        return image
+
+    def _ops_active(self, cfg):
+        return bool(cfg["crop"] or cfg["width"] or cfg["dpi"] or cfg["mark"])
 
     def execute(self, ctx):
         cfg = self.run_cfg
@@ -5434,22 +6529,36 @@ class BilderTab(ToolTab):
             if ctx.stopped():
                 ctx.log("Gestoppt.")
                 return
+            if item.payload is None:                      # Sammel-PDF am Ende
+                try:
+                    entries = []
+                    for path in cfg["files"]:
+                        if not self._ops_active(cfg) and path.suffix.lower() in (".jpg", ".jpeg"):
+                            entries.append(path)          # JPEG unveraendert einbetten
+                        else:
+                            if path not in cache:
+                                cache[path] = self._process(path, cfg)
+                            entries.append((path.name, cache[path]))
+                    target = unique_path(cfg["target_dir"] / "bilder.pdf")
+                    pages = images_to_pdf(entries, target, log=ctx.log)
+                    ctx.item(idx, f"OK ({pages} Seiten)")
+                    ctx.log(f"OK: {target.name} ({pages} Seiten)", "ok")
+                except Exception as exc:
+                    ctx.item(idx, "FEHLER")
+                    ctx.log(f"FEHLER Sammel-PDF: {exc}", "err")
+                ctx.progress(idx + 1, len(self.plan))
+                continue
             path, ext = item.payload
             try:
                 if path not in cache:
-                    image = read_image(path)
-                    if cfg["crop"]:
-                        image = crop(image, cfg["crop"])
-                    if cfg["width"] and image.width > cfg["width"]:
-                        image = resize(image, cfg["width"])
-                    if cfg["dpi"]:
-                        image.dpi = cfg["dpi"]
-                    if cfg["mark"]:
-                        image = watermark(image, cfg["mark"])
-                    cache[path] = image
-                    ctx.log(f"GELESEN: {path.name} ({image.stats()})")
+                    cache[path] = self._process(path, cfg)
+                    ctx.log(f"GELESEN: {path.name} ({cache[path].stats()})")
                 target = unique_path(cfg["target_dir"] / (path.stem + ext))
-                write_image(cache[path], target)
+                if ext == ".pdf":
+                    images_to_pdf([(path.name, cache[path])], target)
+                else:
+                    write_image(cache[path], target, jpeg_quality=cfg["quality"],
+                                optimize_png=cfg["optimize"])
                 ctx.item(idx, "OK")
                 ctx.log(f"OK: {path.name} → {target.name}", "ok")
             except Exception as exc:
@@ -5459,12 +6568,20 @@ class BilderTab(ToolTab):
 
     def option_state(self):
         return {"png": self.png_var.get(), "bmp": self.bmp_var.get(),
+                "jpg": self.jpg_var.get(), "pdf": self.pdf_var.get(),
+                "quality": self.quality_var.get(), "optimize": self.optimize_var.get(),
+                "pdf_combine": self.pdf_combine_var.get(),
                 "width": self.width_var.get(), "dpi": self.dpi_var.get(),
                 "mark": self.mark_var.get(), "crop": [v.get() for v in self.crop_vars]}
 
     def apply_option_state(self, state):
         self.png_var.set(state.get("png", True))
         self.bmp_var.set(state.get("bmp", False))
+        self.jpg_var.set(state.get("jpg", False))
+        self.pdf_var.set(state.get("pdf", False))
+        self.quality_var.set(state.get("quality", "80"))
+        self.optimize_var.set(state.get("optimize", False))
+        self.pdf_combine_var.set(state.get("pdf_combine", True))
         self.width_var.set(state.get("width", ""))
         self.dpi_var.set(state.get("dpi", ""))
         self.mark_var.set(state.get("mark", ""))
@@ -6498,8 +7615,11 @@ class DataConverterApp:
             "  inkl. Dezimalzeichen, Spaltenauswahl, Duplikate, Zusammenführen.\n"
             "• CAD: STL/OBJ/PLY/3MF konvertieren, STEP mit eigenem B-Rep-Kern tessellieren\n"
             "  (→ STL/OBJ/PLY/3MF/GLB/HTML-3D-Ansicht), STEP/IGES-Prüfbericht, DXF → SVG.\n"
-            "• PDF: mergen, splitten, Seitenauszug, Zonen abdecken (eigener PDF-Parser).\n"
-            "• Bilder: PNG ↔ BMP, skalieren, Wasserzeichen, DPI setzen (eigener Codec).\n"
+            "• PDF: mergen, splitten, drehen, umsortieren, Zonen abdecken, Text und\n"
+            "  eingebettete Bilder extrahieren (eigener PDF-Parser).\n"
+            "• Bilder: PNG/BMP/JPG/GIF/TIFF lesen → PNG/BMP/JPG/PDF schreiben, eigener\n"
+            "  JPEG-Codec mit Qualitätsregler, PNG-Palette-Optimierung, zuschneiden,\n"
+            "  skalieren, Wasserzeichen, DPI.\n"
             "• Umbenennen: Suchen/Ersetzen, Präfix/Suffix, Nummern, Datum – mit Vorschau und Rückgängig.\n"
             "• Packen: ZIP/TAR.GZ erstellen, ZIP/TAR/GZ/BZ2/XZ entpacken.\n"
             "• Ordnen: nach Typ/Datum sortieren, Ordner glätten, leere Ordner entfernen – mit Rückgängig.\n"

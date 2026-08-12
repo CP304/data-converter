@@ -1,5 +1,6 @@
 """Backend-Tests ohne GUI: python test_converter_backend.py"""
 
+import struct
 import tempfile
 import zipfile
 from pathlib import Path
@@ -471,6 +472,137 @@ def test_split_zip_bundles(root):
         with zipfile.ZipFile(part) as archive:
             total += len(archive.namelist())
     assert total == 5
+
+
+def test_jpeg_roundtrip(root):
+    width, height = 64, 48
+    data = bytearray()
+    for y in range(height):
+        for x in range(width):
+            data += bytes((min(255, x * 4), min(255, y * 5), 120))
+    image = img_io.Image(width, height, "RGB", data, dpi=150)
+    img_io.write_jpeg(image, root / "probe.jpg", quality=90)
+    back = img_io.read_jpeg(root / "probe.jpg")
+    assert (back.width, back.height, back.dpi) == (width, height, 150)
+    diff_total = 0
+    for i in range(0, len(data), 3):
+        diff_total += abs(back.data[i] - data[i])
+    mean_diff = diff_total / (width * height)
+    assert mean_diff < 10, mean_diff
+
+    # Encoder-Ausgabe durch write_image mit Qualitätsregler
+    img_io.write_image(image, root / "klein.jpg", jpeg_quality=30)
+    assert (root / "klein.jpg").stat().st_size < (root / "probe.jpg").stat().st_size
+
+
+def _gif_bytes(width, height, indices, palette):
+    """Minimal-GIF mit Clear-Code vor jedem Pixel (gültiges LZW ohne Tabellenaufbau)."""
+    min_code = 2
+    clear, end = 4, 5
+    codes = []
+    for idx in indices:
+        codes.extend((clear, idx))
+    codes.append(end)
+    acc = 0
+    bits = 0
+    stream = bytearray()
+    for code in codes:
+        acc |= code << bits
+        bits += 3                                   # Breite = min_code + 1
+        while bits >= 8:
+            stream.append(acc & 0xFF)
+            acc >>= 8
+            bits -= 8
+    if bits:
+        stream.append(acc & 0xFF)
+    out = bytearray(b"GIF89a")
+    out += struct.pack("<HHBBB", width, height, 0x80 | 0x01, 0, 0)   # globale Palette, 4 Farben
+    for color in palette:
+        out += bytes(color)
+    out += b"\x2c" + struct.pack("<HHHHB", 0, 0, width, height, 0)
+    out += bytes([min_code])
+    out += bytes([len(stream)]) + bytes(stream) + b"\x00"
+    out += b"\x3b"
+    return bytes(out)
+
+
+def test_gif_read(root):
+    palette = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+    indices = [0, 1, 2, 3, 3, 2, 1, 0]
+    (root / "probe.gif").write_bytes(_gif_bytes(4, 2, indices, palette))
+    image = img_io.read_gif(root / "probe.gif")
+    assert (image.width, image.height, image.mode) == (4, 2, "RGB")
+    assert bytes(image.data[0:3]) == bytes(palette[0])
+    assert bytes(image.data[3:6]) == bytes(palette[1])
+    assert bytes(image.data[-3:]) == bytes(palette[0])
+
+
+def test_tiff_read(root):
+    width, height = 3, 2
+    pixels = bytes((255, 0, 0, 0, 255, 0, 0, 0, 255,
+                    10, 20, 30, 40, 50, 60, 70, 80, 90))
+    entries = [
+        (256, 3, 1, width), (257, 3, 1, height), (258, 3, 1, 8),
+        (259, 3, 1, 1), (262, 3, 1, 2), (273, 4, 1, 0),   # Offset wird gepatcht
+        (277, 3, 1, 3), (278, 3, 1, height), (279, 4, 1, len(pixels)),
+    ]
+    header = struct.pack("<2sHI", b"II", 42, 8)
+    ifd = struct.pack("<H", len(entries))
+    for tag, ftype, num, value in entries:
+        ifd += struct.pack("<HHII", tag, ftype, num, value)
+    ifd += struct.pack("<I", 0)
+    data_offset = len(header) + len(ifd)
+    blob = bytearray(header + ifd + pixels)
+    for i, (tag, _t, _n, _v) in enumerate(entries):     # StripOffsets patchen
+        if tag == 273:
+            struct.pack_into("<I", blob, len(header) + 2 + i * 12 + 8, data_offset)
+    (root / "probe.tif").write_bytes(bytes(blob))
+    image = img_io.read_tiff(root / "probe.tif")
+    assert (image.width, image.height, image.mode) == (width, height, "RGB")
+    assert bytes(image.data) == pixels
+
+
+def test_png_palette(root):
+    data = bytearray()
+    for i in range(40 * 30):
+        data += bytes((200, 40, 40) if i % 3 else (40, 40, 200))
+    image = img_io.Image(40, 30, "RGB", data)
+    img_io.write_png(image, root / "gross.png")
+    assert img_io.write_png_palette(image, root / "klein.png")
+    assert (root / "klein.png").stat().st_size < (root / "gross.png").stat().st_size
+    back = img_io.read_png(root / "klein.png")
+    assert bytes(back.data) == bytes(data)
+
+
+def test_images_to_pdf_and_extract(root):
+    image = img_io.Image(20, 10, "RGB", bytearray([50, 100, 150] * 200), dpi=72)
+    img_io.write_png(image, root / "bild.png")
+    pages = pdf_io.images_to_pdf([("bild.png", image)], root / "bilder.pdf")
+    assert pages == 1 and pdf_io.pdf_page_count(root / "bilder.pdf") == 1
+
+    out = root / "raus"
+    out.mkdir()
+    saved = pdf_io.pdf_extract_images(root / "bilder.pdf", out, stem="bilder")
+    assert len(saved) == 1 and saved[0].suffix == ".png"
+    back = img_io.read_png(saved[0])
+    assert (back.width, back.height) == (20, 10)
+    assert bytes(back.data) == bytes(image.data)
+
+    # JPEG wird 1:1 eingebettet und 1:1 extrahiert
+    img_io.write_jpeg(image, root / "bild.jpg", quality=85)
+    pdf_io.images_to_pdf([root / "bild.jpg"], root / "jpg.pdf")
+    saved = pdf_io.pdf_extract_images(root / "jpg.pdf", out, stem="jpg")
+    assert saved[0].suffix == ".jpg"
+    assert saved[0].read_bytes() == (root / "bild.jpg").read_bytes()
+
+
+def test_pdf_text(root):
+    src = root / "quelle.pdf"
+    src.write_bytes(_MINI_PDF)
+    pdf_io.pdf_extract_text(src, root / "quelle.txt")
+    text = (root / "quelle.txt").read_text(encoding="utf-8")
+    assert "Angebot 4711" in text and "Seite ZWEI" in text
+    assert "Seite 1" in text and "Seite 2" in text
 
 
 def main():

@@ -95,16 +95,30 @@ Eigener PDF-Parser/-Writer (COS-Objektmodell, auch komprimierte
 Objekt-Streams): mehrere PDFs **mergen**, **splitten** (jede Seite einzeln
 oder Seitenbereich als Auszug), **Seiten drehen** (90/180/270), **umsortieren**
 (`3,1-2`), **Zonen abdecken** (weiß/schwarz, in % der
-Seite — z. B. Preisblock vor dem Weiterleiten an den Kunden). Hinweis:
-Abdecken ist visuell, der Text darunter bleibt extrahierbar; verschlüsselte
-PDFs werden abgelehnt.
+Seite — z. B. Preisblock vor dem Weiterleiten an den Kunden).
+
+Und konvertieren: **PDF → Text** (Content-Stream-Parser; das Ergebnis hängt
+vom Schrift-Encoding der Datei ab) und **eingebettete Bilder extrahieren**
+(JPEGs verlustfrei als .jpg, Flate-Bilder als .png). Der umgekehrte Weg
+(Bilder → PDF) läuft über den Bilder-Tab. Hinweis: Abdecken ist visuell, der
+Text darunter bleibt extrahierbar; verschlüsselte PDFs werden abgelehnt.
 
 ### Bilder
-Eigener PNG- und BMP-Codec (zlib + struct): PNG ↔ BMP konvertieren,
-**zuschneiden** (Zone in %), proportional **skalieren** (bilinear),
-**Wasserzeichen-Text** einblenden
-(eigener Pixelfont, z. B. „ENTWURF" oder „GEPRÜFT 2026"), **DPI setzen**
-für Druck/ERP-Vorgaben. JPEG/TIFF brauchen echte Codecs und bleiben außen vor.
+Komplett eigene Codecs, keine Bibliotheken:
+
+- **Lesen:** PNG, BMP, **JPEG** (Baseline inkl. 4:2:0, eigener Huffman/DCT-Decoder),
+  **GIF** (LZW), **TIFF** (unkomprimiert, PackBits, LZW)
+- **Schreiben:** PNG, BMP, **JPEG mit Qualitätsregler 1–95** (= Komprimierung),
+  **PDF** (einzeln oder alle Bilder als eine Sammel-PDF; JPEGs werden dabei
+  verlustfrei 1:1 eingebettet)
+- **Komprimieren:** JPEG-Qualität wählbar; **PNG-Optimierung** über
+  Farbpaletten-Quantisierung (Median-Cut, deutlich kleinere Dateien bei
+  Screenshots/Etiketten)
+- **Bearbeiten:** zuschneiden (Zone in %), proportional skalieren (bilinear),
+  Wasserzeichen-Text (eigener Pixelfont, z. B. „GEPRÜFT 2026"), DPI setzen
+
+Grenzen: progressive JPEGs und WebP/HEIC/RAW werden nicht gelesen; große
+Fotos brauchen etwas Geduld (reiner Python-Codec).
 
 ### Umbenennen
 Suchen/Ersetzen (optional Regex), Präfix/Suffix, Nummerierung,
@@ -142,8 +156,8 @@ ERP-Importe vereinheitlichen. Quell-Encoding wird automatisch erkannt.
 
 Diese Version verspricht nur, was sie ohne Installationen hält. Nicht enthalten
 sind deshalb: native CAD-Formate (SLDPRT/IPT/eDrawings — proprietäre
-Kernel-Daten), DWG (binär-proprietär), Office→PDF, JPEG/TIFF/RAW,
-RAR/7z-Entpacken, Medien-Konvertierung.
+Kernel-Daten), DWG (binär-proprietär), Office→PDF, WebP/HEIC/RAW und
+progressive JPEGs, RAR/7z-Entpacken, Medien-Konvertierung.
 
 Geplante Abrundungen innerhalb der Vision „praktisches Dateihandling in einem
 Tool": siehe [ROADMAP.md](ROADMAP.md).
