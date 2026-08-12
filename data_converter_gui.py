@@ -13,7 +13,7 @@ Inventar, E-Mail (.eml), Text-Encoding - jeweils mit Vorschau/Dry-Run,
 Live-Log, Undo und Presets.
 """
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 APP_TITLE = "Einkauf Data Converter"
 
 from collections import Counter
@@ -307,7 +307,7 @@ CSV/TSV/TXT, JSON, XML und XLSX wandeln und dabei normalisieren.
 
 
 TABLE_READ_EXTS = [".csv", ".tsv", ".txt", ".xlsx", ".json", ".xml"]
-TABLE_WRITE_EXTS = [".csv", ".tsv", ".xlsx", ".json", ".xml", ".html", ".md"]
+TABLE_WRITE_EXTS = [".csv", ".tsv", ".xlsx", ".json", ".xml", ".html", ".md", ".pdf"]
 DELIMITER_CHOICES = {";": ";", ",": ",", "Tab": "\t", "|": "|"}
 ENCODING_CHOICES = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
 
@@ -575,6 +575,8 @@ def write_table(table, path, delimiter=";", encoding="utf-8-sig"):
         path.write_text(_to_html(table, title=path.stem), encoding="utf-8")
     elif ext == ".md":
         path.write_text(_to_markdown(table), encoding="utf-8")
+    elif ext == ".pdf":
+        table_to_pdf(table, path, title=path.stem)
     else:
         raise ValueError(f"Nicht unterstuetztes Zielformat: {ext}")
 
@@ -1933,10 +1935,10 @@ def _dxf_pairs(text):
             continue
 
 
-def dxf_to_svg(path, target_path):
-    """ASCII-DXF (LINE, CIRCLE, ARC, LWPOLYLINE, POLYLINE, TEXT) als SVG.
+def _dxf_shapes(path):
+    """ASCII-DXF (LINE, CIRCLE, ARC, LWPOLYLINE, POLYLINE, TEXT) parsen.
 
-    Liefert die Anzahl gezeichneter Elemente. Y-Achse wird für SVG gespiegelt.
+    Liefert (Formenliste, (min_x, min_y, max_x, max_y)).
     """
     text = Path(path).read_text(encoding="latin-1", errors="replace")
     entities = []
@@ -1980,7 +1982,6 @@ def dxf_to_svg(path, target_path):
     def note(x, y):
         points_bounds.append((x, y))
 
-    import math as _math
     for entity in entities:
         typ = entity.get("typ")
         if typ == "LINE":
@@ -1994,10 +1995,10 @@ def dxf_to_svg(path, target_path):
             note(cx - r, cy - r); note(cx + r, cy + r)
         elif typ == "ARC":
             cx, cy, r = fget(entity, 10), fget(entity, 20), fget(entity, 40)
-            a0 = _math.radians(fget(entity, 50))
-            a1 = _math.radians(fget(entity, 51))
+            a0 = math.radians(fget(entity, 50))
+            a1 = math.radians(fget(entity, 51))
             if a1 <= a0:
-                a1 += 2 * _math.pi
+                a1 += 2 * math.pi
             shapes.append(("arc", (cx, cy, r, a0, a1)))
             note(cx - r, cy - r); note(cx + r, cy + r)
         elif typ in ("LWPOLYLINE", "POLYLINE"):
@@ -2029,11 +2030,16 @@ def dxf_to_svg(path, target_path):
 
     if not shapes:
         raise ValueError("Keine darstellbaren 2D-Elemente in der DXF-Datei gefunden.")
-
     min_x = min(p[0] for p in points_bounds)
     max_x = max(p[0] for p in points_bounds)
     min_y = min(p[1] for p in points_bounds)
     max_y = max(p[1] for p in points_bounds)
+    return shapes, (min_x, min_y, max_x, max_y)
+
+
+def dxf_to_svg(path, target_path):
+    """DXF als SVG. Liefert die Anzahl gezeichneter Elemente (Y gespiegelt)."""
+    shapes, (min_x, min_y, max_x, max_y) = _dxf_shapes(path)
     width = max(max_x - min_x, 1e-6)
     height = max(max_y - min_y, 1e-6)
     margin = 0.03 * max(width, height)
@@ -2056,9 +2062,9 @@ def dxf_to_svg(path, target_path):
             parts.append(f'<circle cx="{cx:.3f}" cy="{ty(cy):.3f}" r="{r:.3f}"/>')
         elif kind == "arc":
             cx, cy, r, a0, a1 = payload
-            x1 = cx + r * _math.cos(a0); y1 = cy + r * _math.sin(a0)
-            x2 = cx + r * _math.cos(a1); y2 = cy + r * _math.sin(a1)
-            large = 1 if (a1 - a0) > _math.pi else 0
+            x1 = cx + r * math.cos(a0); y1 = cy + r * math.sin(a0)
+            x2 = cx + r * math.cos(a1); y2 = cy + r * math.sin(a1)
+            large = 1 if (a1 - a0) > math.pi else 0
             parts.append(f'<path d="M {x1:.3f} {ty(y1):.3f} '
                          f'A {r:.3f} {r:.3f} 0 {large} 0 {x2:.3f} {ty(y2):.3f}"/>')
         elif kind == "poly":
@@ -5433,6 +5439,545 @@ def pdf_extract_images(path, target_dir, stem="", log=None):
 
 
 # ===========================================================================
+# PDF-Textsatz-Motor und weitere PDF-Konvertierungen:
+# Text/Markdown -> PDF, Tabelle -> PDF, EML -> PDF, PDF -> HTML,
+# PDF -> Tabelle (CSV/XLSX, positionsbasiert), DXF -> PDF
+# ===========================================================================
+
+# Helvetica-Laufweiten (AFM, 1/1000 em) - fuer Zeilenumbruch und Spaltenbreiten
+_HELV_WIDTHS = {
+    " ": 278, "!": 278, '"': 355, "#": 556, "$": 556, "%": 889, "&": 667, "'": 191,
+    "(": 333, ")": 333, "*": 389, "+": 584, ",": 278, "-": 333, ".": 278, "/": 278,
+    ":": 278, ";": 278, "<": 584, "=": 584, ">": 584, "?": 556, "@": 1015,
+    "A": 667, "B": 667, "C": 722, "D": 722, "E": 667, "F": 611, "G": 778, "H": 722,
+    "I": 278, "J": 500, "K": 667, "L": 556, "M": 833, "N": 722, "O": 778, "P": 667,
+    "Q": 778, "R": 722, "S": 667, "T": 611, "U": 722, "V": 667, "W": 944, "X": 667,
+    "Y": 667, "Z": 611, "[": 278, "\\": 278, "]": 278, "^": 469, "_": 556, "`": 333,
+    "a": 556, "b": 556, "c": 500, "d": 556, "e": 556, "f": 278, "g": 556, "h": 556,
+    "i": 222, "j": 222, "k": 500, "l": 222, "m": 833, "n": 556, "o": 556, "p": 556,
+    "q": 556, "r": 333, "s": 500, "t": 278, "u": 556, "v": 500, "w": 722, "x": 500,
+    "y": 500, "z": 500, "{": 334, "|": 260, "}": 334, "~": 584,
+    "Ä": 667, "Ö": 778, "Ü": 722, "ä": 556, "ö": 556, "ü": 556, "ß": 611, "€": 556,
+    "°": 400, "§": 556, "„": 333, "“": 333, "–": 556,
+}
+for _digit in "0123456789":
+    _HELV_WIDTHS[_digit] = 556
+
+
+def _text_width_pt(text, size, mono=False):
+    if mono:
+        return len(text) * 600 / 1000 * size
+    return sum(_HELV_WIDTHS.get(ch, 556) for ch in text) / 1000 * size
+
+
+def _pdf_escape_text(text):
+    raw = text.encode("cp1252", errors="replace")
+    out = bytearray()
+    for byte in raw:
+        if byte in (0x28, 0x29, 0x5C):                    # ( ) \
+            out += b"\\" + bytes([byte])
+        elif byte in (0x0A, 0x0D):
+            out += b" "
+        else:
+            out.append(byte)
+    return bytes(out)
+
+
+class PdfComposer:
+    """Einfacher Textsatz: Absätze, Überschriften, Tabellen, Seitenumbruch."""
+
+    FONTS = {"F1": "Helvetica", "F2": "Helvetica-Bold", "F3": "Courier"}
+
+    def __init__(self, landscape=False, margin=50):
+        self.page_w, self.page_h = (842.0, 595.0) if landscape else (595.0, 842.0)
+        self.margin = margin
+        self.pages = []
+        self.new_page()
+
+    @property
+    def content_width(self):
+        return self.page_w - 2 * self.margin
+
+    def new_page(self):
+        self.pages.append(bytearray())
+        self.y = self.page_h - self.margin
+
+    def ensure_space(self, needed):
+        if self.y - needed < self.margin:
+            self.new_page()
+
+    def draw_text(self, x, y, text, size=10, font="F1"):
+        self.pages[-1] += (f"BT /{font} {size:.1f} Tf {x:.2f} {y:.2f} Td (".encode("ascii")
+                           + _pdf_escape_text(text) + b") Tj ET\n")
+
+    def draw_line(self, x1, y1, x2, y2, width=0.6, gray=0.6):
+        self.pages[-1] += (f"{gray:.2f} G {width:.2f} w "
+                           f"{x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S\n").encode("ascii")
+
+    def draw_rect(self, x, y, w, h, gray=0.92):
+        self.pages[-1] += f"{gray:.2f} g {x:.2f} {y:.2f} {w:.2f} {h:.2f} re f 0 g\n".encode("ascii")
+
+    def _wrap(self, text, size, mono, width):
+        lines = []
+        for raw_line in text.split("\n"):
+            words = raw_line.split(" ")
+            current = ""
+            for word in words:
+                candidate = word if not current else current + " " + word
+                if _text_width_pt(candidate, size, mono) <= width or not current:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            lines.append(current)
+        return lines
+
+    def paragraph(self, text, size=10, bold=False, mono=False, indent=0, leading=1.35):
+        font = "F3" if mono else ("F2" if bold else "F1")
+        width = self.content_width - indent
+        for line in self._wrap(text, size, mono, width):
+            self.ensure_space(size * leading)
+            self.y -= size
+            self.draw_text(self.margin + indent, self.y, line, size, font)
+            self.y -= size * (leading - 1)
+
+    def spacing(self, points=6):
+        self.y -= points
+
+    def heading(self, text, level=1):
+        sizes = {1: 16, 2: 13, 3: 11}
+        self.spacing(8)
+        self.paragraph(text, size=sizes.get(level, 11), bold=True)
+        self.spacing(2)
+
+    def table(self, table_obj, size=8.5):
+        table_obj = table_obj.normalized()
+        columns = len(table_obj.headers)
+        if not columns:
+            return
+        pad = 4.0
+        widths = []
+        for col in range(columns):
+            longest = _text_width_pt(table_obj.headers[col], size, False)
+            for row in table_obj.rows[:400]:
+                longest = max(longest, _text_width_pt(row[col], size, False))
+            widths.append(min(longest + 2 * pad, self.content_width * 0.55))
+        scale = self.content_width / sum(widths) if sum(widths) > self.content_width else 1.0
+        widths = [w * scale for w in widths]
+        row_height = size * 1.7
+
+        def truncate(text, col_width):
+            if _text_width_pt(text, size) <= col_width - 2 * pad:
+                return text
+            while text and _text_width_pt(text + "…", size) > col_width - 2 * pad:
+                text = text[:-1]
+            return text + "…"
+
+        def draw_row(cells, bold=False, fill=False):
+            self.ensure_space(row_height + 2)
+            top = self.y
+            if fill:
+                self.draw_rect(self.margin, top - row_height, sum(widths), row_height)
+            x = self.margin
+            for col, cell in enumerate(cells[:columns]):
+                self.draw_text(x + pad, top - size * 1.15, truncate(cell, widths[col]),
+                               size, "F2" if bold else "F1")
+                x += widths[col]
+            self.draw_line(self.margin, top - row_height, self.margin + sum(widths),
+                           top - row_height, 0.4, 0.75)
+            self.y = top - row_height
+            return top
+
+        draw_row(table_obj.headers, bold=True, fill=True)
+        for row in table_obj.rows:
+            if self.y - row_height < self.margin:
+                self.new_page()
+                draw_row(table_obj.headers, bold=True, fill=True)
+            draw_row(row)
+
+    def save(self, path):
+        writer = PdfWriter()
+        font_refs = {key: writer.add({"Type": PName("Font"), "Subtype": PName("Type1"),
+                                      "BaseFont": PName(name),
+                                      "Encoding": PName("WinAnsiEncoding")})
+                     for key, name in self.FONTS.items()}
+        page_refs = []
+        for content in self.pages:
+            content_ref = writer.add({}, bytes(content))
+            page_refs.append(writer.add({
+                "Type": PName("Page"),
+                "MediaBox": [0, 0, self.page_w, self.page_h],
+                "Resources": {"Font": font_refs},
+                "Contents": content_ref,
+            }))
+        writer.save(path, page_refs)
+        return len(page_refs)
+
+
+def text_to_pdf(source, target, title=None):
+    """TXT/Markdown als PDF setzen (#, ##, -, ``` werden interpretiert)."""
+    text, _encoding = read_text_auto(source)
+    composer = PdfComposer()
+    if title:
+        composer.heading(title, 1)
+        composer.draw_line(composer.margin, composer.y,
+                           composer.page_w - composer.margin, composer.y, 0.8, 0.3)
+        composer.spacing(8)
+    mono_mode = False
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        if stripped.startswith("```"):
+            mono_mode = not mono_mode
+            composer.spacing(3)
+            continue
+        if mono_mode:
+            composer.paragraph(stripped or " ", size=8.5, mono=True, leading=1.25)
+        elif stripped.startswith("## "):
+            composer.heading(stripped[3:], 2)
+        elif stripped.startswith("# "):
+            composer.heading(stripped[2:], 1)
+        elif stripped.startswith(("- ", "* ")):
+            composer.paragraph("• " + stripped[2:], indent=10)
+        elif not stripped:
+            composer.spacing(6)
+        else:
+            composer.paragraph(stripped)
+    return composer.save(target)
+
+
+def table_to_pdf(table_obj, target, title=None):
+    """Tabelle als PDF setzen; bei vielen Spalten automatisch Querformat."""
+    table_obj = table_obj.normalized()
+    landscape = len(table_obj.headers) > 6
+    composer = PdfComposer(landscape=landscape)
+    if title:
+        composer.heading(title, 2)
+    composer.paragraph(f"{len(table_obj.rows)} Zeilen · {len(table_obj.headers)} Spalten",
+                       size=8, leading=1.2)
+    composer.spacing(6)
+    composer.table(table_obj)
+    return composer.save(target)
+
+
+def eml_to_pdf(eml_path, target):
+    """E-Mail als PDF archivieren (Kopf, Text, Anhangliste)."""
+    message = _load_eml(eml_path)
+    composer = PdfComposer()
+    composer.heading(str(message.get("Subject", Path(eml_path).stem)), 2)
+    for label, value in _eml_header_rows(message):
+        composer.paragraph(f"{label}: {value}", size=9, leading=1.25)
+    composer.draw_line(composer.margin, composer.y - 4,
+                       composer.page_w - composer.margin, composer.y - 4, 0.8, 0.3)
+    composer.spacing(14)
+    body = message.get_body(preferencelist=("plain", "html"))
+    if body is not None:
+        content = body.get_content()
+        if body.get_content_type() == "text/html":
+            content = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", content, flags=re.S | re.I)
+            content = re.sub(r"<br\s*/?>|</p>|</div>|</tr>", "\n", content, flags=re.I)
+            content = re.sub(r"<[^>]+>", "", content)
+            content = html_unescape(content)
+        for line in content.strip().splitlines():
+            if line.strip():
+                composer.paragraph(line.strip(), size=10)
+            else:
+                composer.spacing(5)
+    attachments = [part.get_filename() or "anhang" for part in message.iter_attachments()]
+    if attachments:
+        composer.spacing(10)
+        composer.heading(f"Anhänge ({len(attachments)})", 3)
+        for name in attachments:
+            composer.paragraph("• " + name, size=9, indent=10)
+    return composer.save(target)
+
+
+def pdf_to_html(path, target, log=None):
+    """PDF als eigenständige HTML-Datei: Text pro Seite + eingebettete Bilder."""
+    from html import escape as html_escape
+
+    doc = PdfDocument(path)
+    pages = doc.pages()
+    sections = []
+    for number, (page_ref, _inherited) in enumerate(pages, start=1):
+        page = doc.resolve(page_ref)
+        contents = page.get("Contents")
+        refs = contents if isinstance(contents, list) else [contents]
+        stream = b""
+        for ref in refs:
+            if isinstance(ref, PRef):
+                obj = doc.objects.get(int(ref))
+                if obj is not None:
+                    decoded = _decoded_stream(doc, obj)
+                    if decoded:
+                        stream += decoded + b"\n"
+        text = _content_stream_text(stream).strip()
+        sections.append(f"<section><h2>Seite {number}</h2>"
+                        f"<pre>{html_escape(text)}</pre></section>")
+
+    image_html = []
+    for num, obj in sorted(doc.objects.items()):
+        value = obj.value
+        if not (isinstance(value, dict) and value.get("Subtype") == "Image" and obj.stream):
+            continue
+        filters = doc.resolve(value.get("Filter"))
+        filters = [str(f) for f in (filters if isinstance(filters, list) else [filters] if filters else [])]
+        if "DCTDecode" in filters:
+            uri = "data:image/jpeg;base64," + base64.b64encode(obj.stream).decode("ascii")
+            image_html.append(f'<img src="{uri}" alt="Bild {num}">')
+    images_section = ""
+    if image_html:
+        images_section = ("<section><h2>Eingebettete Bilder</h2>"
+                          + "".join(image_html) + "</section>")
+
+    title = Path(path).stem
+    Path(target).write_text(f"""<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>{html_escape(title)}</title>
+<style>
+body {{ font-family: "Segoe UI", system-ui, sans-serif; margin: 2rem auto; max-width: 60rem;
+       color: #1c2430; background: #f6f8fb; }}
+section {{ background: #fff; border: 1px solid #dde3ec; border-radius: 6px;
+          padding: 1rem 1.2rem; margin-bottom: 1rem; }}
+h2 {{ font-size: 1rem; color: #5b6676; }}
+pre {{ white-space: pre-wrap; font-family: inherit; }}
+img {{ max-width: 100%; display: block; margin: .5rem 0; }}
+</style>
+</head>
+<body>
+<h1>{html_escape(title)}</h1>
+{chr(10).join(sections)}
+{images_section}
+</body>
+</html>
+""", encoding="utf-8")
+    if log:
+        log(f"HTML: {len(pages)} Seite(n)" + (f", {len(image_html)} Bild(er)" if image_html else ""))
+    return len(pages)
+
+
+# -- PDF -> Tabelle (positionsbasiert) ------------------------------------------
+
+def _content_stream_fragments(stream):
+    """Textfragmente mit Position: [(x, y, größe, text)]. Näherung ohne Fontmetrik."""
+    fragments = []
+    lexer = _Lexer(stream)
+    pos = 0
+    operands = []
+    line_x = line_y = cursor_x = 0.0
+    size = 10.0
+    leading = 12.0
+    length = len(stream)
+
+    def emit(raw):
+        nonlocal cursor_x
+        text = raw.decode("cp1252", errors="replace")
+        if text.strip():
+            fragments.append((cursor_x, line_y, size, text))
+        cursor_x += _text_width_pt(text, size)
+
+    while pos < length:
+        ch = stream[pos:pos + 1]
+        if ch in _WHITESPACE:
+            pos += 1
+            continue
+        if ch in (b"(", b"<", b"[", b"/") or ch.isdigit() or ch in (b"-", b"+", b"."):
+            lexer.pos = pos
+            try:
+                value = lexer.parse()
+            except PdfError:
+                pos += 1
+                continue
+            pos = lexer.pos
+            operands.append(value)
+            continue
+        match = re.match(rb"[A-Za-z'\"*]+", stream[pos:])
+        if not match:
+            pos += 1
+            continue
+        op = match.group(0)
+        pos += match.end()
+        numbers = [v for v in operands if isinstance(v, (int, float))]
+        if op == b"Tf" and numbers:
+            size = float(numbers[-1]) or size
+        elif op == b"TL" and numbers:
+            leading = float(numbers[-1])
+        elif op == b"Tm" and len(numbers) >= 6:
+            line_x = cursor_x = float(numbers[-2])
+            line_y = float(numbers[-1])
+            scale = abs(float(numbers[-3])) or 1.0
+            if scale not in (0.0, 1.0):
+                pass
+        elif op in (b"Td", b"TD") and len(numbers) >= 2:
+            line_x += float(numbers[-2])
+            line_y += float(numbers[-1])
+            cursor_x = line_x
+            if op == b"TD":
+                leading = -float(numbers[-1]) or leading
+        elif op == b"T*":
+            line_y -= leading
+            cursor_x = line_x
+        elif op in (b"Tj", b"'", b'"'):
+            if op in (b"'", b'"'):
+                line_y -= leading
+                cursor_x = line_x
+            for value in operands:
+                if isinstance(value, bytes):
+                    emit(value)
+        elif op == b"TJ":
+            for value in operands:
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, bytes):
+                            emit(item)
+                        elif isinstance(item, (int, float)):
+                            cursor_x -= float(item) / 1000.0 * size
+        elif op == b"BT":
+            line_x = line_y = cursor_x = 0.0
+        operands = []
+    return fragments
+
+
+def pdf_extract_table(path, log=None):
+    """Tabellarischen Text aus einer (digital erzeugten) PDF rekonstruieren."""
+    doc = PdfDocument(path)
+    all_rows = []
+    for page_number, (page_ref, _inherited) in enumerate(doc.pages()):
+        page = doc.resolve(page_ref)
+        contents = page.get("Contents")
+        refs = contents if isinstance(contents, list) else [contents]
+        stream = b""
+        for ref in refs:
+            if isinstance(ref, PRef):
+                obj = doc.objects.get(int(ref))
+                if obj is not None:
+                    decoded = _decoded_stream(doc, obj)
+                    if decoded:
+                        stream += decoded + b"\n"
+        fragments = _content_stream_fragments(stream)
+        if not fragments:
+            continue
+        fragments.sort(key=lambda f: (-f[1], f[0]))
+        rows = []
+        for x, y, size, text in fragments:
+            tolerance = max(2.0, size * 0.5)
+            if rows and abs(rows[-1]["y"] - y) <= tolerance:
+                rows[-1]["cells"].append((x, size, text))
+            else:
+                rows.append({"y": y, "cells": [(x, size, text)]})
+        for row in rows:
+            cells = sorted(row["cells"])
+            merged = []
+            for x, size, text in cells:
+                if merged and x - merged[-1]["end"] < size * 0.6:
+                    merged[-1]["text"] += text
+                    merged[-1]["end"] = x + _text_width_pt(text, size)
+                else:
+                    merged.append({"x": x, "end": x + _text_width_pt(text, size),
+                                   "text": text})
+            all_rows.append([(cell["x"], cell["text"].strip()) for cell in merged])
+
+    if not all_rows:
+        raise PdfError("Kein positionierbarer Text gefunden (gescannte PDF?).")
+
+    # Spaltenraster über alle Zeilen bilden
+    columns = []
+    for row in all_rows:
+        for x, _text in row:
+            for column in columns:
+                if abs(column - x) <= 8.0:
+                    break
+            else:
+                columns.append(x)
+    columns.sort()
+
+    grid = []
+    for row in all_rows:
+        line = [""] * len(columns)
+        for x, text in row:
+            index = min(range(len(columns)), key=lambda c: abs(columns[c] - x))
+            line[index] = (line[index] + " " + text).strip()
+        grid.append(line)
+    used = [c for c in range(len(columns)) if any(row[c] for row in grid)]
+    grid = [[row[c] for c in used] for row in grid]
+    headers = grid[0] if grid else []
+    table = Table([h or f"Spalte {i + 1}" for i, h in enumerate(headers)], grid[1:])
+    if log:
+        log(f"TABELLE: {len(table.rows)} Zeilen, {len(table.headers)} Spalten erkannt.")
+    return table
+
+
+# -- DXF -> PDF -------------------------------------------------------------------
+
+def dxf_to_pdf(path, target_path):
+    """DXF-Zeichnung als Vektor-PDF (Linien, Kreise, Bögen, Polylinien, Text)."""
+    shapes, bounds = _dxf_shapes(path)
+    min_x, min_y, max_x, max_y = bounds
+    width = max(max_x - min_x, 1e-6)
+    height = max(max_y - min_y, 1e-6)
+    page_w, page_h = (842.0, 595.0) if width >= height else (595.0, 842.0)
+    margin = 40.0
+    scale = min((page_w - 2 * margin) / width, (page_h - 2 * margin) / height)
+
+    def tx(x):
+        return margin + (x - min_x) * scale
+
+    def ty(y):
+        return margin + (y - min_y) * scale
+
+    content = bytearray(b"0.10 w 0 G 1 j 1 J\n")
+
+    def bezier_arc(cx, cy, r, a0, a1):
+        segments = max(1, int(math.ceil(abs(a1 - a0) / (math.pi / 2))))
+        for s in range(segments):
+            t0 = a0 + (a1 - a0) * s / segments
+            t1 = a0 + (a1 - a0) * (s + 1) / segments
+            k = 4 / 3 * math.tan((t1 - t0) / 4)
+            x0, y0 = cx + r * math.cos(t0), cy + r * math.sin(t0)
+            x3, y3 = cx + r * math.cos(t1), cy + r * math.sin(t1)
+            x1, y1 = x0 - k * r * math.sin(t0), y0 + k * r * math.cos(t0)
+            x2, y2 = x3 + k * r * math.sin(t1), y3 - k * r * math.cos(t1)
+            if s == 0:
+                content.extend(f"{tx(x0):.2f} {ty(y0):.2f} m\n".encode("ascii"))
+            content.extend(f"{tx(x1):.2f} {ty(y1):.2f} {tx(x2):.2f} {ty(y2):.2f} "
+                           f"{tx(x3):.2f} {ty(y3):.2f} c\n".encode("ascii"))
+        content.extend(b"S\n")
+
+    for kind, payload in shapes:
+        if kind == "line":
+            x1, y1, x2, y2 = payload
+            content.extend(f"{tx(x1):.2f} {ty(y1):.2f} m {tx(x2):.2f} {ty(y2):.2f} l S\n".encode("ascii"))
+        elif kind == "circle":
+            cx, cy, r = payload
+            bezier_arc(cx, cy, r, 0, 2 * math.pi)
+        elif kind == "arc":
+            cx, cy, r, a0, a1 = payload
+            bezier_arc(cx, cy, r, a0, a1)
+        elif kind == "poly":
+            pts, closed = payload
+            content.extend(f"{tx(pts[0][0]):.2f} {ty(pts[0][1]):.2f} m\n".encode("ascii"))
+            for x, y in pts[1:]:
+                content.extend(f"{tx(x):.2f} {ty(y):.2f} l\n".encode("ascii"))
+            content.extend(b"h S\n" if closed else b"S\n")
+        elif kind == "text":
+            x, y, h, text_value = payload
+            font_size = max(4.0, h * scale)
+            content.extend(f"BT /F1 {font_size:.1f} Tf {tx(x):.2f} {ty(y):.2f} Td (".encode("ascii")
+                           + _pdf_escape_text(text_value) + b") Tj ET\n")
+
+    writer = PdfWriter()
+    font_ref = writer.add({"Type": PName("Font"), "Subtype": PName("Type1"),
+                           "BaseFont": PName("Helvetica"),
+                           "Encoding": PName("WinAnsiEncoding")})
+    content_ref = writer.add({}, bytes(content))
+    page = writer.add({"Type": PName("Page"), "MediaBox": [0, 0, page_w, page_h],
+                       "Resources": {"Font": {"F1": font_ref}}, "Contents": content_ref})
+    writer.save(target_path, [page])
+    return len(shapes)
+
+
+# ===========================================================================
 # Selbsttest (--self-test)
 # ===========================================================================
 
@@ -6125,8 +6670,14 @@ class CadTab(ToolTab):
         self.log_dir = target_dir
         if mode == "dxf":
             self.run_cfg = {"mode": mode, "files": files, "target_dir": target_dir}
-            return [PlanItem(path.name, format_size(path.stat().st_size),
-                             str(target_dir / (path.stem + ".svg")), payload=path) for path in files]
+            plan = []
+            for path in files:
+                size = format_size(path.stat().st_size)
+                plan.append(PlanItem(path.name, size, str(target_dir / (path.stem + ".svg")),
+                                     payload=(path, ".svg")))
+                plan.append(PlanItem(path.name, size, str(target_dir / (path.stem + ".pdf")),
+                                     payload=(path, ".pdf")))
+            return plan
         if mode == "konvertieren":
             formats = [ext for ext, var in self.format_vars.items() if var.get()]
             if not formats:
@@ -6157,10 +6708,13 @@ class CadTab(ToolTab):
                 if ctx.stopped():
                     ctx.log("Gestoppt.")
                     return
-                path = item.payload
+                path, out_ext = item.payload
                 try:
-                    target = unique_path(cfg["target_dir"] / (path.stem + ".svg"))
-                    count = dxf_to_svg(path, target)
+                    target = unique_path(cfg["target_dir"] / (path.stem + out_ext))
+                    if out_ext == ".pdf":
+                        count = dxf_to_pdf(path, target)
+                    else:
+                        count = dxf_to_svg(path, target)
                     ctx.item(idx, "OK")
                     ctx.log(f"OK: {path.name} → {target.name} ({count} Elemente)", "ok")
                 except Exception as exc:
@@ -6247,7 +6801,10 @@ PDF_MODES = {"mergen": "Zusammenführen",
              "umsortieren": "Umsortieren",
              "abdecken": "Zone abdecken",
              "text": "→ Text (TXT)",
-             "bilderraus": "Bilder extrahieren"}
+             "bilderraus": "Bilder extrahieren",
+             "html": "→ HTML",
+             "tabelle": "→ Tabelle (CSV/XLSX)",
+             "austext": "aus Text/Markdown"}
 
 
 class PdfTab(ToolTab):
@@ -6265,7 +6822,8 @@ class PdfTab(ToolTab):
         for index, (value, label) in enumerate(PDF_MODES.items()):
             parent_row = row1 if index < 6 else row1b
             ttk.Radiobutton(parent_row, text=label, value=value, variable=self.mode_var,
-                            style="Card.TRadiobutton").pack(side="left", padx=(0, 12))
+                            style="Card.TRadiobutton",
+                            command=self._pdf_mode_changed).pack(side="left", padx=(0, 12))
         row1b.pack(fill="x", pady=(4, 0))
 
         row2 = ttk.Frame(parent, style="Card.TFrame")
@@ -6299,8 +6857,14 @@ class PdfTab(ToolTab):
                             "bleibt in der Datei extrahierbar (keine echte Schwärzung). Verschlüsselte "
                             "PDFs werden abgelehnt.", style="CardSub.TLabel").pack(side="left")
 
+    def _pdf_mode_changed(self):
+        wanted = "txt, md" if self.mode_var.get() == "austext" else "pdf"
+        if self.source.ext_var.get().strip() in ("pdf", "txt, md", ""):
+            self.source.ext_var.set(wanted)
+
     def make_plan(self):
         mode = self.mode_var.get()
+        self._pdf_mode_changed()
         files = self.source.collect()
         target_dir = self.target.resolve(self.source.base_dir())
         self.log_dir = target_dir
@@ -6328,7 +6892,10 @@ class PdfTab(ToolTab):
                   "umsortieren": f"Reihenfolge {self.run_cfg['order']}",
                   "abdecken": f"Zone abdecken ({self.run_cfg['color']})",
                   "text": "Text extrahieren (TXT)",
-                  "bilderraus": "eingebettete Bilder extrahieren"}
+                  "bilderraus": "eingebettete Bilder extrahieren",
+                  "html": "als HTML (Text + Bilder)",
+                  "tabelle": "Tabelle erkennen (CSV + XLSX)",
+                  "austext": "PDF setzen (Text/Markdown)"}
         return [PlanItem(path.name, format_size(path.stat().st_size),
                          labels[mode], payload=path) for path in files]
 
@@ -6373,6 +6940,23 @@ class PdfTab(ToolTab):
                 elif cfg["mode"] == "bilderraus":
                     saved = pdf_extract_images(path, cfg["target_dir"], stem=path.stem, log=ctx.log)
                     ctx.item(idx, f"OK ({len(saved)})")
+                elif cfg["mode"] == "html":
+                    target = unique_path(cfg["target_dir"] / (path.stem + ".html"))
+                    pdf_to_html(path, target, log=ctx.log)
+                    ctx.item(idx, "OK")
+                    ctx.log(f"OK: {path.name} → {target.name}", "ok")
+                elif cfg["mode"] == "tabelle":
+                    table = pdf_extract_table(path, log=ctx.log)
+                    for out_ext in (".csv", ".xlsx"):
+                        target = unique_path(cfg["target_dir"] / (path.stem + "_tabelle" + out_ext))
+                        write_table(table, target)
+                        ctx.log(f"OK: {target.name}", "ok")
+                    ctx.item(idx, f"OK ({len(table.rows)} Zeilen)")
+                elif cfg["mode"] == "austext":
+                    target = unique_path(cfg["target_dir"] / (path.stem + ".pdf"))
+                    pages = text_to_pdf(path, target, title=path.stem)
+                    ctx.item(idx, f"OK ({pages} S.)")
+                    ctx.log(f"OK: {path.name} → {target.name} ({pages} Seiten)", "ok")
                 else:
                     target = unique_path(cfg["target_dir"] / (path.stem + "_abgedeckt.pdf"))
                     covered = redact_pdf(path, target, cfg["zone"], cfg["color"],
@@ -7080,6 +7664,8 @@ class EmlTab(ToolTab):
         ttk.Radiobutton(row, text="Als HTML konvertieren (mit eingebetteten Bildern)", value="html",
                         variable=self.mode_var, style="Card.TRadiobutton").pack(side="left", padx=(0, 14))
         ttk.Radiobutton(row, text="Als Text konvertieren", value="txt", variable=self.mode_var,
+                        style="Card.TRadiobutton").pack(side="left", padx=(0, 14))
+        ttk.Radiobutton(row, text="Als PDF archivieren", value="pdf", variable=self.mode_var,
                         style="Card.TRadiobutton").pack(side="left", padx=(0, 18))
         self.subfolder_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(row, text="Pro E-Mail einen Unterordner (nur Anhänge)",
@@ -7094,7 +7680,8 @@ class EmlTab(ToolTab):
         self.log_dir = target_dir
         targets = {"anhaenge": "Anhänge extrahieren",
                    "html": lambda p: str(target_dir / (p.stem + ".html")),
-                   "txt": lambda p: str(target_dir / (p.stem + ".txt"))}
+                   "txt": lambda p: str(target_dir / (p.stem + ".txt")),
+                   "pdf": lambda p: str(target_dir / (p.stem + ".pdf"))}
         plan = []
         for path in files:
             label = targets[mode] if mode == "anhaenge" else targets[mode](path)
@@ -7117,10 +7704,12 @@ class EmlTab(ToolTab):
                     total_attachments += count
                     ctx.item(idx, f"OK ({count})")
                 else:
-                    ext = ".html" if cfg["mode"] == "html" else ".txt"
+                    ext = {"html": ".html", "txt": ".txt", "pdf": ".pdf"}[cfg["mode"]]
                     target = unique_path(cfg["target_dir"] / (path.stem + ext))
                     if cfg["mode"] == "html":
                         eml_to_html(path, target)
+                    elif cfg["mode"] == "pdf":
+                        eml_to_pdf(path, target)
                     else:
                         eml_to_text(path, target)
                     ctx.item(idx, "OK")
@@ -7615,8 +8204,9 @@ class DataConverterApp:
             "  inkl. Dezimalzeichen, Spaltenauswahl, Duplikate, Zusammenführen.\n"
             "• CAD: STL/OBJ/PLY/3MF konvertieren, STEP mit eigenem B-Rep-Kern tessellieren\n"
             "  (→ STL/OBJ/PLY/3MF/GLB/HTML-3D-Ansicht), STEP/IGES-Prüfbericht, DXF → SVG.\n"
-            "• PDF: mergen, splitten, drehen, umsortieren, Zonen abdecken, Text und\n"
-            "  eingebettete Bilder extrahieren (eigener PDF-Parser).\n"
+            "• PDF: mergen, splitten, drehen, umsortieren, Zonen abdecken; konvertieren:\n"
+            "  PDF → Text/HTML/Tabelle (CSV/XLSX), Bilder extrahieren, Text/Markdown → PDF,\n"
+            "  Tabellen → PDF, E-Mails → PDF, DXF → PDF (eigener Parser + Textsatz).\n"
             "• Bilder: PNG/BMP/JPG/GIF/TIFF lesen → PNG/BMP/JPG/PDF schreiben, eigener\n"
             "  JPEG-Codec mit Qualitätsregler, PNG-Palette-Optimierung, zuschneiden,\n"
             "  skalieren, Wasserzeichen, DPI.\n"

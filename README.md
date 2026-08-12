@@ -60,7 +60,7 @@ Preislisten, Stücklisten und Lieferantenlisten wandeln und aufbereiten.
   erkannt, auch cp1252-Altdaten), XLSX, JSON, XML
 - **Schreiben:** CSV, TSV, **XLSX** (eigener Writer auf zipfile-Basis, öffnet
   sauber in Excel, Kopfzeile fett, Spaltenbreiten angepasst), JSON, XML,
-  HTML-Bericht, Markdown
+  HTML-Bericht, Markdown, **PDF** (gesetzte Tabelle mit Gitternetz)
 - **Aufbereitung:** Werte trimmen, Leerzeilen/Duplikate entfernen,
   Dezimalzeichen normalisieren (`1.234,50` ↔ `1234.50`), Spalten auswählen und
   umbenennen (`Alt>Neu; SKU`), mehrere Dateien zu einer Tabelle
@@ -79,8 +79,8 @@ Verfeinerung — alles Standardbibliothek).
   an Kollegen ohne CAD-Lizenz)
 - **STEP/IGES-Prüfbericht:** Schema, Produkte, Einheiten, Autor, Entitäten-Statistik,
   Geometrieart — als CSV/HTML für die Wareneingangsprüfung von CAD-Daten
-- **DXF → SVG:** 2D-Zeichnungen (LINE, CIRCLE, ARC, Polylinien, TEXT) als
-  skalierbare Browser-Ansicht
+- **DXF → SVG + PDF:** 2D-Zeichnungen (LINE, CIRCLE, ARC, Polylinien, TEXT)
+  als skalierbare Browser-Ansicht und als Vektor-PDF
 - Qualitätsstufen grob/mittel/fein für die STEP-Tessellierung
 
 Grenzen (ehrlich): Native Formate wie SLDPRT/IPT/eDrawings enthalten
@@ -97,11 +97,25 @@ oder Seitenbereich als Auszug), **Seiten drehen** (90/180/270), **umsortieren**
 (`3,1-2`), **Zonen abdecken** (weiß/schwarz, in % der
 Seite — z. B. Preisblock vor dem Weiterleiten an den Kunden).
 
-Und konvertieren: **PDF → Text** (Content-Stream-Parser; das Ergebnis hängt
-vom Schrift-Encoding der Datei ab) und **eingebettete Bilder extrahieren**
-(JPEGs verlustfrei als .jpg, Flate-Bilder als .png). Der umgekehrte Weg
-(Bilder → PDF) läuft über den Bilder-Tab. Hinweis: Abdecken ist visuell, der
-Text darunter bleibt extrahierbar; verschlüsselte PDFs werden abgelehnt.
+Und konvertieren — in beide Richtungen, über einen eigenen
+PDF-Textsatz-Motor (Helvetica-Metriken, Zeilenumbruch, Seitenumbruch):
+
+- **PDF → Text** (Content-Stream-Parser; das Ergebnis hängt vom
+  Schrift-Encoding der Datei ab)
+- **PDF → HTML** (Text pro Seite + eingebettete Bilder als Data-URIs)
+- **PDF → Tabelle (CSV + XLSX)**: positionsbasierte Erkennung von
+  Tabellen in digital erzeugten PDFs (Angebots-/Preistabellen) — bei
+  gescannten PDFs ohne Textebene geht das nicht
+- **Bilder extrahieren** (JPEGs verlustfrei als .jpg, Flate-Bilder als .png)
+- **Text/Markdown → PDF** (`#`, `##`, `-`, ``` werden gesetzt)
+- **Tabellen → PDF** (im Tabellen-Tab: Preisliste als gesetztes PDF mit
+  Gitternetz, Kopfzeile, Seitenumbruch, automatischem Querformat)
+- **E-Mails → PDF** (im E-Mail-Tab: Angebote revisionssicher ablegen)
+- **Bilder → PDF** (im Bilder-Tab, einzeln oder Sammel-PDF)
+- **DXF → PDF** (im CAD-Tab: Vektorzeichnung mit Bézier-Bögen)
+
+Hinweis: Abdecken ist visuell, der Text darunter bleibt extrahierbar;
+verschlüsselte PDFs werden abgelehnt.
 
 ### Bilder
 Komplett eigene Codecs, keine Bibliotheken:
@@ -146,7 +160,8 @@ Optional eine `SHA256SUMS.txt` im Standardformat für die Übergabe.
 Anhänge aus `.eml`-Dateien (Export aus Outlook/Thunderbird) gesammelt
 extrahieren (optional ein Unterordner pro Mail) — oder Mails komplett
 archivieren: **als HTML** (eingebettete Bilder werden als Data-URIs
-mitgenommen, die Datei ist allein lebensfähig) oder als lesbare Textdatei.
+mitgenommen, die Datei ist allein lebensfähig), **als PDF** (revisionssicher,
+mit Kopfdaten und Anhangliste) oder als lesbare Textdatei.
 
 ### Text/Encoding
 Encoding (UTF-8, UTF-8-BOM, cp1252, latin-1) und Zeilenenden (CRLF/LF) für

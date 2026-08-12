@@ -605,6 +605,72 @@ def test_pdf_text(root):
     assert "Seite 1" in text and "Seite 2" in text
 
 
+def test_text_to_pdf(root):
+    (root / "notiz.md").write_text(
+        "# Bestellung 4711\n\nLieferant: Müller GmbH\n\n- Position 1: Welle\n- Position 2: Flansch\n",
+        encoding="utf-8")
+    pages = pdf_io.text_to_pdf(root / "notiz.md", root / "notiz.pdf", title="notiz")
+    assert pages == 1 and pdf_io.pdf_page_count(root / "notiz.pdf") == 1
+    pdf_io.pdf_extract_text(root / "notiz.pdf", root / "rueck.txt")
+    text = (root / "rueck.txt").read_text(encoding="utf-8")
+    assert "Bestellung 4711" in text and "Müller" in text and "Flansch" in text
+
+
+def test_table_to_pdf_and_extract(root):
+    table = tabular.Table(["SKU", "Lieferant", "Preis"],
+                          [["A-100", "Müller GmbH", "12,40"],
+                           ["B-200", "Schmidt AG", "8,10"],
+                           ["C-300", "Demo Parts", "44,90"]])
+    tabular.write_table(table, root / "preise.pdf")          # über den Tabellen-Dispatch
+    assert pdf_io.pdf_page_count(root / "preise.pdf") == 1
+
+    back = pdf_io.pdf_extract_table(root / "preise.pdf")
+    flat = [cell for row in back.rows for cell in row] + back.headers
+    assert any("A-100" in cell for cell in flat), flat
+    assert any("Schmidt AG" in cell for cell in flat), flat
+    # SKU und Preis muessen in unterschiedlichen Spalten gelandet sein
+    sku_row = next(row for row in back.rows if any("B-200" in c for c in row))
+    assert any("8,10" in c for c in sku_row) and len([c for c in sku_row if c]) >= 3, sku_row
+
+
+def test_eml_to_pdf(root):
+    eml = root / "angebot.eml"
+    eml.write_bytes(
+        b"From: lieferant@example.com\r\nTo: einkauf@example.com\r\n"
+        b"Subject: Angebot 4711\r\nMIME-Version: 1.0\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+        b"Preis: 12,40 EUR\r\nLieferzeit: 3 Wochen\r\n")
+    pages = filetools.eml_to_pdf(eml, root / "angebot.pdf")
+    assert pages >= 1
+    pdf_io.pdf_extract_text(root / "angebot.pdf", root / "angebot.txt")
+    text = (root / "angebot.txt").read_text(encoding="utf-8")
+    assert "Angebot 4711" in text and "12,40" in text
+
+
+def test_pdf_to_html(root):
+    src = root / "quelle.pdf"
+    src.write_bytes(_MINI_PDF)
+    pdf_io.pdf_to_html(src, root / "quelle.html")
+    html = (root / "quelle.html").read_text(encoding="utf-8")
+    assert "Angebot 4711" in html and "Seite 2" in html
+
+
+def test_dxf_to_pdf(root):
+    dxf_lines = ["0", "SECTION", "2", "ENTITIES",
+                 "0", "LINE", "10", "0", "20", "0", "11", "100", "21", "0",
+                 "0", "CIRCLE", "10", "50", "20", "30", "40", "10",
+                 "0", "TEXT", "10", "5", "20", "60", "40", "5", "1", "Platte A-100",
+                 "0", "ENDSEC", "0", "EOF"]
+    (root / "zeichnung.dxf").write_text("\n".join(dxf_lines) + "\n", encoding="ascii")
+    count = cad_io.dxf_to_pdf(root / "zeichnung.dxf", root / "zeichnung.pdf")
+    assert count == 3
+    assert pdf_io.pdf_page_count(root / "zeichnung.pdf") == 1
+    raw = (root / "zeichnung.pdf").read_bytes()
+    assert b" c\n" in raw and b" l S" in raw            # Bezier-Kreis + Linie
+    pdf_io.pdf_extract_text(root / "zeichnung.pdf", root / "z.txt")
+    assert "Platte A-100" in (root / "z.txt").read_text(encoding="utf-8")
+
+
 def main():
     tests = [value for name, value in globals().items() if name.startswith("test_") and callable(value)]
     for test in tests:
