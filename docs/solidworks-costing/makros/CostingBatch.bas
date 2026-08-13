@@ -10,7 +10,7 @@
 '   Die Costing-API kann KEINE Vorlagen befuellen. Stundensaetze,
 '   Materialpreise und Ruestkosten muessen vorher im Costing-Vorlagen-
 '   Editor bzw. per Excel-Import in die Vorlage eingetragen werden
-'   (siehe ..\README.md, Kapitel 3 und 4).
+'   (siehe ..\README.md bzw. ..\Hintergrund-und-Quellen.md, Kapitel 3 und 4).
 '
 ' Einsatz:
 '   SOLIDWORKS > Extras > Makro > Neu ... > Code einfuegen > als .swp
